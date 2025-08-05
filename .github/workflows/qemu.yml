@@ -33,7 +33,6 @@ jobs:
         run: |
           nohup qemu-system-x86_64 \
             -m 2048 \
-            -cpu host \
             -drive file=freebsd.qcow2,format=qcow2 \
             -net user,hostfwd=tcp::2222-:22 \
             -net nic \
@@ -49,4 +48,4 @@ jobs:
 
       - name: Clone repo in VM and build
         run: |
-          ssh -o StrictHostKeyChecking=no -p 2222 freebsd@localhost "git clone https://github.com/${{ github.repository }} oca && cd oca && mkimage"
+          ssh -o StrictHostKeyChecking=no -p 2222 freebsd@localhost "git clone https://github.com/${{ github.repository }} oca && cd oca && make -DNO_CLEAN buildkernel"
