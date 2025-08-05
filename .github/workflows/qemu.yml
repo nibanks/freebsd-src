@@ -22,7 +22,11 @@ jobs:
 
       - name: Download latest FreeBSD stable ISO
         run: |
-          wget -O FreeBSD.iso https://download.freebsd.org/ftp/releases/ISO-IMAGES/13.3/FreeBSD-13.3-RELEASE-amd64-disc1.iso
+          LATEST_URL=$(curl -s https://download.freebsd.org/ftp/releases/ISO-IMAGES/ | grep -Eo 'href="[0-9]+\.[0-9]+/' | grep -vE 'RC|BETA' | sort -V | tail -1 | cut -d'"' -f2)
+          ISO_PAGE="https://download.freebsd.org/ftp/releases/ISO-IMAGES/${LATEST_URL}"
+          ISO_FILE=$(curl -s "$ISO_PAGE" | grep -Eo 'FreeBSD-[0-9.]+-RELEASE-amd64-disc1.iso' | head -1)
+          FULL_URL="${ISO_PAGE}${ISO_FILE}"
+          wget -O FreeBSD.iso "$FULL_URL"
 
       - name: Create QEMU disk image
         run: |
