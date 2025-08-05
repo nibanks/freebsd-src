@@ -22,8 +22,8 @@ jobs:
 
       - name: Download latest FreeBSD VM image
         run: |
-          LATEST_URL=$(curl -s https://download.freebsd.org/ftp/releases/VM-IMAGES/ | grep -Eo 'href="[0-9]+\.[0-9]+/' | grep -vE 'RC|BETA' | sort -V | tail -1 | cut -d'"' -f2)
-          IMG_PAGE="https://download.freebsd.org/ftp/releases/VM-IMAGES/${LATEST_URL}amd64/Latest/"
+          LATEST_RELEASE=$(curl -s https://download.freebsd.org/ftp/releases/VM-IMAGES/ | grep -Eo 'href="[0-9]+\.[0-9]+-RELEASE/' | sort -V | tail -1 | cut -d'"' -f2)
+          IMG_PAGE="https://download.freebsd.org/ftp/releases/VM-IMAGES/${LATEST_RELEASE}amd64/Latest/"
           IMG_FILE=$(curl -s "$IMG_PAGE" | grep -Eo 'FreeBSD-[0-9.]+-RELEASE-amd64.qcow2.xz' | head -1)
           FULL_URL="${IMG_PAGE}${IMG_FILE}"
           wget -O freebsd.qcow2.xz "$FULL_URL"
