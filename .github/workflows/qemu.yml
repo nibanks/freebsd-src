@@ -20,23 +20,20 @@ jobs:
           sudo apt-get update --quiet || true
           sudo apt-get install -y wget qemu-system-x86 qemu-utils openssh-client netcat-openbsd
 
-      - name: Download latest FreeBSD stable ISO
+      - name: Download latest FreeBSD VM image
         run: |
-          LATEST_URL=$(curl -s https://download.freebsd.org/ftp/releases/ISO-IMAGES/ | grep -Eo 'href="[0-9]+\.[0-9]+/' | grep -vE 'RC|BETA' | sort -V | tail -1 | cut -d'"' -f2)
-          ISO_PAGE="https://download.freebsd.org/ftp/releases/ISO-IMAGES/${LATEST_URL}"
-          ISO_FILE=$(curl -s "$ISO_PAGE" | grep -Eo 'FreeBSD-[0-9.]+-RELEASE-amd64-disc1.iso' | head -1)
-          FULL_URL="${ISO_PAGE}${ISO_FILE}"
-          wget -O FreeBSD.iso "$FULL_URL"
-
-      - name: Create QEMU disk image
-        run: |
-          qemu-img create -f qcow2 freebsd.qcow2 20G
+          LATEST_URL=$(curl -s https://download.freebsd.org/ftp/releases/VM-IMAGES/ | grep -Eo 'href="[0-9]+\.[0-9]+/' | grep -vE 'RC|BETA' | sort -V | tail -1 | cut -d'"' -f2)
+          IMG_PAGE="https://download.freebsd.org/ftp/releases/VM-IMAGES/${LATEST_URL}amd64/Latest/"
+          IMG_FILE=$(curl -s "$IMG_PAGE" | grep -Eo 'FreeBSD-[0-9.]+-RELEASE-amd64.qcow2.xz' | head -1)
+          FULL_URL="${IMG_PAGE}${IMG_FILE}"
+          wget -O freebsd.qcow2.xz "$FULL_URL"
+          xz -d freebsd.qcow2.xz
 
       - name: Start FreeBSD VM (background)
         run: |
           nohup qemu-system-x86_64 \
             -m 2048 \
-            -cdrom FreeBSD.iso \
+            -cpu host \
             -drive file=freebsd.qcow2,format=qcow2 \
             -net user,hostfwd=tcp::2222-:22 \
             -net nic \
