@@ -18,3 +18,34 @@ jobs:
       - name: install packages
         run: |
           sudo apt-get update --quiet || true
+          sudo apt-get install -y wget qemu-system-x86 qemu-utils openssh-client netcat-openbsd
+
+      - name: Download latest FreeBSD stable ISO
+        run: |
+          wget -O FreeBSD.iso https://download.freebsd.org/ftp/releases/ISO-IMAGES/13.3/FreeBSD-13.3-RELEASE-amd64-disc1.iso
+
+      - name: Create QEMU disk image
+        run: |
+          qemu-img create -f qcow2 freebsd.qcow2 20G
+
+      - name: Start FreeBSD VM (background)
+        run: |
+          nohup qemu-system-x86_64 \
+            -m 2048 \
+            -cdrom FreeBSD.iso \
+            -drive file=freebsd.qcow2,format=qcow2 \
+            -net user,hostfwd=tcp::2222-:22 \
+            -net nic \
+            -nographic &
+          sleep 60
+
+      - name: Wait for SSH (VM boot)
+        run: |
+          for i in {1..60}; do
+            nc -z localhost 2222 && break
+            sleep 5
+          done
+
+      - name: Clone repo in VM and build
+        run: |
+          ssh -o StrictHostKeyChecking=no -p 2222 freebsd@localhost "git clone https://github.com/${{ github.repository }} oca && cd oca && mkimage"
