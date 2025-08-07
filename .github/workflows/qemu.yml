@@ -24,17 +24,31 @@ jobs:
       - name: Generate SSH key if missing
         run: |
           if [ ! -f ~/.ssh/id_rsa ]; then
-            ssh-keygen -q -t rsa -N "" -f ~/.ssh/id_rsa
+            ssh-keygen -q -t rsa -N "" -f ~/.ssh/id_rsa -b 2048
           fi
+          # Ensure SSH directory and permissions are correct
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/id_rsa
+          chmod 644 ~/.ssh/id_rsa.pub
 
-      - name: Download latest FreeBSD CLOUDINIT VM image
+      - name: Cache FreeBSD image
+        uses: actions/cache@v4
+        with:
+          path: freebsd-14.3-RELEASE.qcow2
+          key: freebsd-14.3-RELEASE-qcow2
+
+      - name: Download FreeBSD CLOUDINIT VM image
         run: |
-          LATEST_RELEASE=$(curl -s https://download.freebsd.org/ftp/releases/VM-IMAGES/ | grep -Eo 'href="[0-9]+\.[0-9]+-RELEASE/' | sort -V | tail -1 | cut -d'"' -f2)
-          IMG_PAGE="https://download.freebsd.org/ftp/releases/VM-IMAGES/${LATEST_RELEASE}amd64/Latest/"
-          IMG_FILE=$(curl -s "$IMG_PAGE" | grep -Eo 'FreeBSD-[0-9.]+-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz' | head -1)
-          FULL_URL="${IMG_PAGE}${IMG_FILE}"
-          wget -O freebsd.qcow2.xz "$FULL_URL"
-          xz -d freebsd.qcow2.xz
+          FREEBSD_FILE="freebsd-14.3-RELEASE.qcow2"
+          if [ ! -f "$FREEBSD_FILE" ]; then
+            echo "FreeBSD VM image not found, downloading..."
+            wget -O freebsd.qcow2.xz "https://download.freebsd.org/ftp/releases/VM-IMAGES/14.3-RELEASE/amd64/Latest/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+            xz -d freebsd.qcow2.xz
+            mv freebsd.qcow2 "$FREEBSD_FILE"
+          else
+            echo "FreeBSD VM image already exists in cache, skipping download"
+          fi
 
       - name: Create cloud-init config
         run: |
@@ -43,36 +57,106 @@ jobs:
           #cloud-config
           users:
             - name: freebsd
+              gecos: FreeBSD User
+              groups: wheel
               ssh-authorized-keys:
                 - $(cat ~/.ssh/id_rsa.pub)
               sudo: ["ALL=(ALL) NOPASSWD:ALL"]
               shell: /bin/sh
+              lock_passwd: false
           chpasswd:
             list: |
               freebsd:freebsd
             expire: False
-          ssh_pwauth: False
+          ssh_pwauth: false
+          disable_root: false
+          package_update: false
+          package_upgrade: false
+          runcmd:
+            - /usr/sbin/service sshd enable || true
+            - /usr/sbin/service sshd restart || true
+            - echo "Cloud-init completed" | logger
+          write_files:
+            - path: /etc/ssh/sshd_config
+              append: true
+              content: |
+                PasswordAuthentication no
+                PubkeyAuthentication yes
+                AuthorizedKeysFile .ssh/authorized_keys
+                PermitRootLogin yes
+                ClientAliveInterval 60
+                ClientAliveCountMax 3
+                MaxStartups 10:30:100
           EOF
-          touch cloudinit/meta-data
+          cat > cloudinit/meta-data <<EOF
+          instance-id: freebsd-vm-001
+          local-hostname: freebsd-vm
+          EOF
           genisoimage -output cloudinit.iso -volid cidata -joliet -rock cloudinit/user-data cloudinit/meta-data
 
       - name: Start FreeBSD VM (background)
         run: |
+          echo "Starting FreeBSD VM..."
+          FREEBSD_FILE="freebsd-14.3-RELEASE.qcow2"
           nohup qemu-system-x86_64 \
             -m 2048 \
-            -drive file=freebsd.qcow2,format=qcow2 \
+            -drive file="$FREEBSD_FILE",format=qcow2 \
             -drive file=cloudinit.iso,format=raw \
-            -net user,hostfwd=tcp::2222-:22 \
-            -net nic \
-            -nographic &
+            -netdev user,id=net0,hostfwd=tcp::2223-:22 \
+            -device e1000,netdev=net0 \
+            -nographic \
+            -machine type=pc,accel=tcg \
+            -cpu qemu64 \
+            -smp 2 > qemu.log 2>&1 &
+          
+          QEMU_PID=$!
+          echo "QEMU started with PID: $QEMU_PID"
+          
+          # Ensure QEMU is actually running
+          sleep 10
+          if ! kill -0 $QEMU_PID 2>/dev/null; then
+            echo "QEMU failed to start. Check qemu.log:"
+            cat qemu.log || true
+            exit 1
+          fi
+          echo "QEMU is running successfully"
 
       - name: Wait for SSH (VM boot)
         run: |
-          for i in {1..180}; do
-            nc -z localhost 2222 && break
+          echo "Waiting for VM to boot and SSH to become available..."
+          SSH_READY=false
+          for i in {1..90}; do
+            if nc -z localhost 2223 2>/dev/null; then
+              echo "Port 2223 is open, testing SSH connection..."
+              if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -i ~/.ssh/id_rsa -p 2223 freebsd@localhost "echo 'SSH connection test successful'" 2>/dev/null; then
+                echo "SSH connection successful!"
+                SSH_READY=true
+                break
+              fi
+            fi
+            echo "Attempt $i/90: VM not ready yet, waiting 5 seconds..."
             sleep 5
           done
+          if [ "$SSH_READY" != "true" ]; then
+            echo "Failed to establish SSH connection. Check QEMU logs:"
+            cat qemu.log || true
+            exit 1
+          fi
 
       - name: Clone repo in VM and build
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa -p 2222 freebsd@localhost "git clone https://github.com/${{ github.repository }} oca && cd oca && make -DNO_CLEAN buildkernel"
+          echo "Starting build process in VM..."
+          if ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -i ~/.ssh/id_rsa -p 2223 freebsd@localhost "git clone https://github.com/${{ github.repository }} oca && cd oca && make -DNO_CLEAN buildkernel"; then
+            echo "Build failed. Checking QEMU logs:"
+            cat qemu.log || true
+            exit 1
+          fi
+          echo "Build completed successfully!"
+
+      - name: Upload QEMU logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-logs
+          path: qemu.log
+          retention-days: 3
