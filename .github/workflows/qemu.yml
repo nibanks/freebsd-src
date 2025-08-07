@@ -17,8 +17,15 @@ jobs:
     steps:
       - name: install packages
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update --quiet || true
-          sudo apt-get install -y wget qemu-system-x86 qemu-utils openssh-client netcat-openbsd
+          sudo apt-get install -y wget qemu-system-x86 qemu-utils openssh-client netcat-openbsd genisoimage
+
+      - name: Generate SSH key if missing
+        run: |
+          if [ ! -f ~/.ssh/id_rsa ]; then
+            ssh-keygen -q -t rsa -N "" -f ~/.ssh/id_rsa
+          fi
 
       - name: Download latest FreeBSD CLOUDINIT VM image
         run: |
@@ -44,7 +51,7 @@ jobs:
             list: |
               freebsd:freebsd
             expire: False
-          ssh_pwauth: True
+          ssh_pwauth: False
           EOF
           touch cloudinit/meta-data
           genisoimage -output cloudinit.iso -volid cidata -joliet -rock cloudinit/user-data cloudinit/meta-data
@@ -58,15 +65,14 @@ jobs:
             -net user,hostfwd=tcp::2222-:22 \
             -net nic \
             -nographic &
-          sleep 60
 
       - name: Wait for SSH (VM boot)
         run: |
-          for i in {1..60}; do
+          for i in {1..180}; do
             nc -z localhost 2222 && break
             sleep 5
           done
 
       - name: Clone repo in VM and build
         run: |
-          ssh -o StrictHostKeyChecking=no -p 2222 freebsd@localhost "git clone https://github.com/${{ github.repository }} oca && cd oca && make -DNO_CLEAN buildkernel"
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa -p 2222 freebsd@localhost "git clone https://github.com/${{ github.repository }} oca && cd oca && make -DNO_CLEAN buildkernel"
