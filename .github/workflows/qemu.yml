@@ -20,20 +20,41 @@ jobs:
           sudo apt-get update --quiet || true
           sudo apt-get install -y wget qemu-system-x86 qemu-utils openssh-client netcat-openbsd
 
-      - name: Download latest FreeBSD VM image
+      - name: Download latest FreeBSD CLOUDINIT VM image
         run: |
           LATEST_RELEASE=$(curl -s https://download.freebsd.org/ftp/releases/VM-IMAGES/ | grep -Eo 'href="[0-9]+\.[0-9]+-RELEASE/' | sort -V | tail -1 | cut -d'"' -f2)
           IMG_PAGE="https://download.freebsd.org/ftp/releases/VM-IMAGES/${LATEST_RELEASE}amd64/Latest/"
-          IMG_FILE=$(curl -s "$IMG_PAGE" | grep -Eo 'FreeBSD-[0-9.]+-RELEASE-amd64.qcow2.xz' | head -1)
+          IMG_FILE=$(curl -s "$IMG_PAGE" | grep -Eo 'FreeBSD-[0-9.]+-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz' | head -1)
           FULL_URL="${IMG_PAGE}${IMG_FILE}"
           wget -O freebsd.qcow2.xz "$FULL_URL"
           xz -d freebsd.qcow2.xz
+
+      - name: Create cloud-init config
+        run: |
+          mkdir -p cloudinit
+          cat > cloudinit/user-data <<EOF
+          #cloud-config
+          users:
+            - name: freebsd
+              ssh-authorized-keys:
+                - $(cat ~/.ssh/id_rsa.pub)
+              sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+              shell: /bin/sh
+          chpasswd:
+            list: |
+              freebsd:freebsd
+            expire: False
+          ssh_pwauth: True
+          EOF
+          touch cloudinit/meta-data
+          genisoimage -output cloudinit.iso -volid cidata -joliet -rock cloudinit/user-data cloudinit/meta-data
 
       - name: Start FreeBSD VM (background)
         run: |
           nohup qemu-system-x86_64 \
             -m 2048 \
             -drive file=freebsd.qcow2,format=qcow2 \
+            -drive file=cloudinit.iso,format=raw \
             -net user,hostfwd=tcp::2222-:22 \
             -net nic \
             -nographic &
