@@ -19,7 +19,7 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update --quiet || true
-          sudo apt-get install -y wget qemu-system-x86 qemu-utils openssh-client netcat-openbsd genisoimage
+          sudo apt-get install -y wget qemu-system-x86 qemu-utils openssh-client netcat-openbsd genisoimage sshpass
 
       - name: Generate SSH key if missing
         run: |
@@ -32,29 +32,80 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           chmod 644 ~/.ssh/id_rsa.pub
 
-      - name: Cache FreeBSD image
+      - name: Cache FreeBSD pre-configured image
+        id: cache-configured
         uses: actions/cache@v4
         with:
-          path: freebsd-14.3-RELEASE.qcow2
-          key: freebsd-14.3-RELEASE-qcow2
+          path: freebsd-14.3-RELEASE-configured.qcow2
+          key: freebsd-14.3-RELEASE-configured-qcow2-v2
 
-      - name: Download FreeBSD CLOUDINIT VM image
+      - name: Create pre-configured FreeBSD image (cache miss)
+        if: steps.cache-configured.outputs.cache-hit != 'true'
         run: |
-          FREEBSD_FILE="freebsd-14.3-RELEASE.qcow2"
-          if [ ! -f "$FREEBSD_FILE" ]; then
-            echo "FreeBSD VM image not found, downloading..."
-            wget -O freebsd.qcow2.xz "https://download.freebsd.org/ftp/releases/VM-IMAGES/14.3-RELEASE/amd64/Latest/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
-            xz -d freebsd.qcow2.xz
-            mv freebsd.qcow2 "$FREEBSD_FILE"
-          else
-            echo "FreeBSD VM image already exists in cache, skipping download"
-          fi
+          echo "Pre-configured FreeBSD image not found. Creating one..."
+          echo "This will take about 10 minutes but only needs to be done once per cache."
+          
+          # Download base FreeBSD image
+          echo "Downloading FreeBSD base image..."
+          wget -O freebsd.qcow2.xz "https://download.freebsd.org/ftp/releases/VM-IMAGES/14.3-RELEASE/amd64/Latest/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+          xz -d freebsd.qcow2.xz
+          
+          # Install libguestfs-tools for image modification
+          sudo apt-get install -y libguestfs-tools
+          
+          # Use virt-customize to pre-configure the image to disable freebsd-update
+          echo "Configuring FreeBSD image to disable automatic updates..."
+          sudo virt-customize -a freebsd.qcow2 \
+            --write '/etc/rc.conf.local:# Disable freebsd-update and periodic tasks
+          freebsd_update_enable="NO"
+          periodic_enable="NO"
+          daily_enable="NO"
+          weekly_enable="NO"
+          monthly_enable="NO"
+          security_enable="NO"
+          daily_status_security_enable="NO"
+          weekly_status_security_enable="NO"
+          monthly_status_security_enable="NO"
+          sshd_enable="YES"
+          sendmail_enable="NONE"
+          background_fsck="NO"
+          fsck_y_enable="YES"' \
+            --write '/etc/periodic.conf:# Disable all periodic tasks including freebsd-update
+          daily_output="/dev/null"
+          weekly_output="/dev/null"
+          monthly_output="/dev/null"
+          daily_show_success="NO"
+          daily_show_info="NO"
+          daily_show_badconfig="NO"
+          weekly_show_success="NO"
+          weekly_show_info="NO"
+          weekly_show_badconfig="NO"
+          monthly_show_success="NO"
+          monthly_show_info="NO"
+          monthly_show_badconfig="NO"
+          daily_status_security_enable="NO"
+          weekly_status_security_enable="NO"
+          monthly_status_security_enable="NO"' \
+            --chmod '0644:/etc/rc.conf.local' \
+            --chmod '0644:/etc/periodic.conf' \
+            --selinux-relabel || echo "Pre-configuration completed with warnings"
+          
+          # Move to final cached location
+          mv freebsd.qcow2 freebsd-14.3-RELEASE-configured.qcow2
+          
+          echo "Pre-configured FreeBSD image created successfully!"
 
       - name: Create cloud-init config
         run: |
+          # Create a fresh copy for this run using the pre-configured image
+          echo "Creating fresh VM image copy from pre-configured image..."
+          cp freebsd-14.3-RELEASE-configured.qcow2 freebsd.qcow2
+          
           mkdir -p cloudinit
           cat > cloudinit/user-data <<EOF
           #cloud-config
+          
+          # Create user with SSH access
           users:
             - name: freebsd
               gecos: FreeBSD User
@@ -64,23 +115,28 @@ jobs:
               sudo: ["ALL=(ALL) NOPASSWD:ALL"]
               shell: /bin/sh
               lock_passwd: false
-          chpasswd:
-            list: |
-              freebsd:freebsd
-            expire: False
-          ssh_pwauth: false
+              passwd: "\$6\$rounds=4096\$saltsaltsal\$91dJJjqNqLI6qKPwJhHKLG0Zng0qNXUiRCQ4ZlVEF8dNq2cLFqHMlQvxfpnrS0p0bFx/5ZwZDLFy4VNPTEr5h/"
+          
+          # Ensure SSH is properly configured
+          ssh_pwauth: true
           disable_root: false
           package_update: false
           package_upgrade: false
+          
+          # Append to rc.conf from our pre-configured settings
           runcmd:
+            - cat /etc/rc.conf.local >> /etc/rc.conf || true
             - /usr/sbin/service sshd enable || true
             - /usr/sbin/service sshd restart || true
-            - echo "Cloud-init completed" | logger
+            - pkill -f freebsd-update || true
+            - echo "FreeBSD VM configured and ready" | logger
+          
+          # Ensure proper SSH configuration
           write_files:
             - path: /etc/ssh/sshd_config
               append: true
               content: |
-                PasswordAuthentication no
+                PasswordAuthentication yes
                 PubkeyAuthentication yes
                 AuthorizedKeysFile .ssh/authorized_keys
                 PermitRootLogin yes
@@ -88,6 +144,7 @@ jobs:
                 ClientAliveCountMax 3
                 MaxStartups 10:30:100
           EOF
+          
           cat > cloudinit/meta-data <<EOF
           instance-id: freebsd-vm-001
           local-hostname: freebsd-vm
@@ -97,10 +154,9 @@ jobs:
       - name: Start FreeBSD VM (background)
         run: |
           echo "Starting FreeBSD VM..."
-          FREEBSD_FILE="freebsd-14.3-RELEASE.qcow2"
           nohup qemu-system-x86_64 \
             -m 2048 \
-            -drive file="$FREEBSD_FILE",format=qcow2 \
+            -drive file=freebsd.qcow2,format=qcow2 \
             -drive file=cloudinit.iso,format=raw \
             -netdev user,id=net0,hostfwd=tcp::2223-:22 \
             -device e1000,netdev=net0 \
@@ -124,33 +180,111 @@ jobs:
       - name: Wait for SSH (VM boot)
         run: |
           echo "Waiting for VM to boot and SSH to become available..."
+          echo "Using pre-configured image - boot should complete in 1-2 minutes without freebsd-update delays..."
+          
+          # Wait for FreeBSD to boot (much faster with pre-configured image)
+          BOOT_COMPLETE=false
+          for i in {1..8}; do  # Shorter timeout since no freebsd-update
+            echo "Boot check attempt $i/8..."
+            
+            # Check if we can see login prompt, SSH starting, or boot completion
+            if tail -20 qemu.log | grep -q "login:\|Starting.*ssh\|sshd.*started\|Console.*login\|FreeBSD.*login"; then
+              echo "FreeBSD boot complete with services running!"
+              BOOT_COMPLETE=true
+              break
+            fi
+            
+            # Check for other boot progress indicators
+            if tail -20 qemu.log | grep -q "Starting.*service\|Mounting.*filesystems\|Setting.*hostname\|Starting.*daemon"; then
+              echo "FreeBSD services starting..."
+            fi
+            
+            sleep 15  # Shorter intervals
+          done
+          
+          if [ "$BOOT_COMPLETE" != "true" ]; then
+            echo "FreeBSD boot may not be complete. Recent log:"
+            tail -20 qemu.log
+            echo "Continuing with SSH connection attempts..."
+          fi
+          
+          # Test SSH connection
           SSH_READY=false
-          for i in {1..90}; do
+          for i in {1..12}; do  # Reduced from 90 to 12 attempts (6 minutes max)
             if nc -z localhost 2223 2>/dev/null; then
               echo "Port 2223 is open, testing SSH connection..."
-              if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -i ~/.ssh/id_rsa -p 2223 freebsd@localhost "echo 'SSH connection test successful'" 2>/dev/null; then
-                echo "SSH connection successful!"
+              
+              # Try SSH key authentication first
+              if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -o PubkeyAuthentication=yes -i ~/.ssh/id_rsa -p 2223 freebsd@localhost "echo 'SSH key auth successful'; uname -a" 2>/dev/null; then
+                echo "SSH key authentication successful!"
+                SSH_READY=true
+                break
+              fi
+              
+              # Fallback to password authentication if key auth fails
+              if sshpass -p "freebsd" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=yes -o PubkeyAuthentication=no -p 2223 freebsd@localhost "echo 'SSH password auth successful'; uname -a" 2>/dev/null; then
+                echo "SSH password authentication successful!"
                 SSH_READY=true
                 break
               fi
             fi
-            echo "Attempt $i/90: VM not ready yet, waiting 5 seconds..."
-            sleep 5
+            echo "Attempt $i/12: SSH not ready yet, waiting 30 seconds..."
+            sleep 30
           done
+          
           if [ "$SSH_READY" != "true" ]; then
             echo "Failed to establish SSH connection. Check QEMU logs:"
-            cat qemu.log || true
+            tail -50 qemu.log || true
             exit 1
           fi
+          
+          echo "SSH connection established successfully!"
 
       - name: Clone repo in VM and build
         run: |
           echo "Starting build process in VM..."
-          if ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -i ~/.ssh/id_rsa -p 2223 freebsd@localhost "git clone https://github.com/${{ github.repository }} oca && cd oca && make -DNO_CLEAN buildkernel"; then
+          
+          # Determine which SSH method worked
+          SSH_CMD=""
+          
+          # Try SSH key authentication first
+          if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -o PubkeyAuthentication=yes -i ~/.ssh/id_rsa -p 2223 freebsd@localhost "echo 'SSH key auth test'" >/dev/null 2>&1; then
+            echo "Using SSH key authentication"
+            SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -o PubkeyAuthentication=yes -i ~/.ssh/id_rsa -p 2223 freebsd@localhost"
+          else
+            echo "Using SSH password authentication"
+            SSH_CMD="sshpass -p freebsd ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=yes -o PubkeyAuthentication=no -p 2223 freebsd@localhost"
+          fi
+          
+          # Configure FreeBSD system if needed
+          echo "Ensuring FreeBSD system is properly configured..."
+          $SSH_CMD "
+            # Enable SSH daemon permanently
+            echo 'sshd_enable=\"YES\"' >> /etc/rc.conf || true
+            service sshd enable || true
+            
+            # Kill any remaining freebsd-update processes
+            pkill -f freebsd-update || true
+            
+            echo 'FreeBSD system configuration completed'
+            uname -a
+          " || echo "System configuration completed with warnings"
+          
+          # Clone repository and build
+          echo "Cloning repository and starting kernel build..."
+          if ! $SSH_CMD "
+            # Clone the repository
+            git clone https://github.com/${{ github.repository }} oca || (cd oca && git pull)
+            cd oca
+            
+            # Start the kernel build using BSD make syntax
+            env MAKEOBJDIRPREFIX=/usr/obj make buildkernel
+          "; then
             echo "Build failed. Checking QEMU logs:"
-            cat qemu.log || true
+            tail -50 qemu.log || true
             exit 1
           fi
+          
           echo "Build completed successfully!"
 
       - name: Upload QEMU logs
