@@ -43,34 +43,54 @@ jobs:
         if: steps.cache-configured.outputs.cache-hit != 'true'
         run: |
           echo "Pre-configured FreeBSD image not found. Creating one..."
-          echo "This will take about 10 minutes but only needs to be done once per cache."
+          echo "This will take about 15 minutes but only needs to be done once per cache."
           
           # Download base FreeBSD image
           echo "Downloading FreeBSD base image..."
-          wget -O freebsd.qcow2.xz "https://download.freebsd.org/ftp/releases/VM-IMAGES/14.3-RELEASE/amd64/Latest/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
-          xz -d freebsd.qcow2.xz
+          wget -O freebsd-base.qcow2.xz "https://download.freebsd.org/ftp/releases/VM-IMAGES/14.3-RELEASE/amd64/Latest/FreeBSD-14.3-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+          xz -d freebsd-base.qcow2.xz
           
-          # Install libguestfs-tools for image modification
-          sudo apt-get install -y libguestfs-tools
+          # Create configuration VM to let freebsd-update complete and then disable it
+          echo "Starting initial configuration VM (this will run freebsd-update once)..."
           
-          # Use virt-customize to pre-configure the image to disable freebsd-update
-          echo "Configuring FreeBSD image to disable automatic updates..."
-          sudo virt-customize -a freebsd.qcow2 \
-            --write '/etc/rc.conf.local:# Disable freebsd-update and periodic tasks
-          freebsd_update_enable="NO"
-          periodic_enable="NO"
-          daily_enable="NO"
-          weekly_enable="NO"
-          monthly_enable="NO"
-          security_enable="NO"
-          daily_status_security_enable="NO"
-          weekly_status_security_enable="NO"
-          monthly_status_security_enable="NO"
-          sshd_enable="YES"
-          sendmail_enable="NONE"
-          background_fsck="NO"
-          fsck_y_enable="YES"' \
-            --write '/etc/periodic.conf:# Disable all periodic tasks including freebsd-update
+          # Create cloud-init config for one-time setup
+          mkdir -p config-setup
+          cat > config-setup/user-data << 'EOF'
+          #cloud-config
+          users:
+            - name: freebsd
+              gecos: FreeBSD User
+              groups: wheel
+              ssh-authorized-keys:
+                - $(cat ~/.ssh/id_rsa.pub)
+              sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+              shell: /bin/sh
+              lock_passwd: false
+              passwd: "$6$rounds=4096$saltsaltsal$91dJJjqNqLI6qKPwJhHKLG0Zng0qNXUiRCQ4ZlVEF8dNq2cLFqHMlQvxfpnrS0p0bFx/5ZwZDLFy4VNPTEr5h/"
+          
+          ssh_pwauth: true
+          disable_root: false
+          package_update: false
+          package_upgrade: false
+          
+          # Let freebsd-update complete, then disable it permanently
+          runcmd:
+            - echo "Waiting for freebsd-update to complete..."
+            - while pgrep -f freebsd-update > /dev/null; do sleep 30; done
+            - echo "freebsd-update completed, now disabling it permanently"
+            - echo 'freebsd_update_enable="NO"' >> /etc/rc.conf
+            - echo 'periodic_enable="NO"' >> /etc/rc.conf
+            - echo 'daily_enable="NO"' >> /etc/rc.conf
+            - echo 'weekly_enable="NO"' >> /etc/rc.conf
+            - echo 'monthly_enable="NO"' >> /etc/rc.conf
+            - echo 'security_enable="NO"' >> /etc/rc.conf
+            - echo 'daily_status_security_enable="NO"' >> /etc/rc.conf
+            - echo 'weekly_status_security_enable="NO"' >> /etc/rc.conf
+            - echo 'monthly_status_security_enable="NO"' >> /etc/rc.conf
+            - echo 'sshd_enable="YES"' >> /etc/rc.conf
+            - echo 'sendmail_enable="NONE"' >> /etc/rc.conf
+            - cat > /etc/periodic.conf << 'PERIODICEOF'
+          # Disable all periodic tasks including freebsd-update
           daily_output="/dev/null"
           weekly_output="/dev/null"
           monthly_output="/dev/null"
@@ -85,13 +105,82 @@ jobs:
           monthly_show_badconfig="NO"
           daily_status_security_enable="NO"
           weekly_status_security_enable="NO"
-          monthly_status_security_enable="NO"' \
-            --chmod '0644:/etc/rc.conf.local' \
-            --chmod '0644:/etc/periodic.conf' \
-            --selinux-relabel || echo "Pre-configuration completed with warnings"
+          monthly_status_security_enable="NO"
+          PERIODICEOF
+            - chmod 644 /etc/periodic.conf
+            - service sshd enable
+            - service sshd restart
+            - touch /root/.freebsd-configured
+            - echo "FreeBSD pre-configuration completed" | logger
+            - sync
+          EOF
+          
+          cat > config-setup/meta-data << 'EOF'
+          instance-id: freebsd-config-001
+          local-hostname: freebsd-config
+          EOF
+          
+          # Substitute the actual SSH key
+          sed -i "s|\$(cat ~/.ssh/id_rsa.pub)|$(cat ~/.ssh/id_rsa.pub)|g" config-setup/user-data
+          
+          # Create config ISO
+          genisoimage -output config.iso -volid cidata -joliet -rock config-setup/ 2>/dev/null
+          
+          # Start configuration VM in background
+          nohup qemu-system-x86_64 \
+            -m 2048 \
+            -drive file=freebsd-base.qcow2,format=qcow2 \
+            -drive file=config.iso,format=raw \
+            -netdev user,id=net0,hostfwd=tcp::2224-:22 \
+            -device e1000,netdev=net0 \
+            -nographic \
+            -machine type=pc,accel=tcg \
+            -cpu qemu64 \
+            -smp 2 > config.log 2>&1 &
+          
+          CONFIG_PID=$!
+          echo "Configuration VM started with PID: $CONFIG_PID"
+          
+          # Wait for the configuration to complete (freebsd-update + our config)
+          echo "Waiting for FreeBSD to complete freebsd-update and apply our configuration..."
+          echo "This will take about 12-15 minutes..."
+          
+          # Wait for SSH to be available and configuration to complete
+          for i in {1..45}; do  # 22.5 minutes max
+            if nc -z localhost 2224 2>/dev/null; then
+              # Check if configuration is complete
+              if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=yes -o PubkeyAuthentication=no -p 2224 freebsd@localhost "test -f /root/.freebsd-configured" 2>/dev/null; then
+                echo "Configuration completed!"
+                break
+              fi
+            fi
+            echo "Configuration attempt $i/45: Still configuring..."
+            sleep 30
+          done
+          
+          # Gracefully shutdown the VM
+          echo "Shutting down configuration VM..."
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=yes -o PubkeyAuthentication=no -p 2224 freebsd@localhost "sudo shutdown -h now" 2>/dev/null || true
+          
+          # Wait for VM to shutdown
+          sleep 30
+          kill $CONFIG_PID 2>/dev/null || true
+          
+          # Wait for port to be free
+          for i in {1..10}; do
+            if ! nc -z localhost 2224 2>/dev/null; then
+              break
+            fi
+            echo "Waiting for port 2224 to be free..."
+            sleep 2
+          done
           
           # Move to final cached location
-          mv freebsd.qcow2 freebsd-14.3-RELEASE-configured.qcow2
+          mv freebsd-base.qcow2 freebsd-14.3-RELEASE-configured.qcow2
+          
+          # Cleanup
+          rm -f config.iso config.log
+          rm -rf config-setup
           
           echo "Pre-configured FreeBSD image created successfully!"
 
@@ -123,13 +212,12 @@ jobs:
           package_update: false
           package_upgrade: false
           
-          # Append to rc.conf from our pre-configured settings
+          # Since this is a pre-configured image, just ensure SSH is running
           runcmd:
-            - cat /etc/rc.conf.local >> /etc/rc.conf || true
             - /usr/sbin/service sshd enable || true
             - /usr/sbin/service sshd restart || true
             - pkill -f freebsd-update || true
-            - echo "FreeBSD VM configured and ready" | logger
+            - echo "FreeBSD VM ready (pre-configured)" | logger
           
           # Ensure proper SSH configuration
           write_files:
@@ -188,7 +276,7 @@ jobs:
             echo "Boot check attempt $i/8..."
             
             # Check if we can see login prompt, SSH starting, or boot completion
-            if tail -20 qemu.log | grep -q "login:\|Starting.*ssh\|sshd.*started\|Console.*login\|FreeBSD.*login"; then
+            if tail -20 qemu.log | grep -q "login:\|Starting.*ssh\|sshd.*started\|Console.*login\|FreeBSD.*login\|pre-configured"; then
               echo "FreeBSD boot complete with services running!"
               BOOT_COMPLETE=true
               break
@@ -208,9 +296,9 @@ jobs:
             echo "Continuing with SSH connection attempts..."
           fi
           
-          # Test SSH connection
+          # Test SSH connection - should be much faster now
           SSH_READY=false
-          for i in {1..12}; do  # Reduced from 90 to 12 attempts (6 minutes max)
+          for i in {1..8}; do  # Reduced even further since image is pre-configured
             if nc -z localhost 2223 2>/dev/null; then
               echo "Port 2223 is open, testing SSH connection..."
               
@@ -228,8 +316,8 @@ jobs:
                 break
               fi
             fi
-            echo "Attempt $i/12: SSH not ready yet, waiting 30 seconds..."
-            sleep 30
+            echo "Attempt $i/8: SSH not ready yet, waiting 20 seconds..."
+            sleep 20
           done
           
           if [ "$SSH_READY" != "true" ]; then
