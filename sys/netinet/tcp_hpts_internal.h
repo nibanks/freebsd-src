@@ -52,6 +52,25 @@
 /* The number of connections after which the dynamic sleep logic kicks in. */
 #define DEFAULT_CONNECTION_THRESHOLD 100
 
+/*
+ * The hpts uses a 102400 wheel. The wheel
+ * defines the time in 10 usec increments (102400 x 10).
+ * This gives a range of 10usec - 1024ms to place
+ * an entry within. If the user requests more than
+ * 1.024 second, a remaineder is attached and the hpts
+ * when seeing the remainder will re-insert the
+ * inpcb forward in time from where it is until
+ * the remainder is zero.
+ */
+
+#define NUM_OF_HPTSI_SLOTS 102400
+
+/* Convert microseconds to HPTS slots */
+#define HPTS_USEC_TO_SLOTS(x) ((x+9) /10)
+
+/* The number of connections after which the dynamic sleep logic kicks in. */
+#define DEFAULT_CONNECTION_THRESHOLD 100
+
 extern int tcp_bind_threads; 		/* Thread binding configuration
 					 * (0=none, 1=cpu, 2=numa) */
 
