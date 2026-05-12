@@ -147,6 +147,7 @@ MAN=	accept_filter.9 \
 	ecn.9 \
 	efirt.9 \
 	epoch.9 \
+	eventlog.9 \
 	ether_gen_addr.9 \
 	EVENTHANDLER.9 \
 	eventtimers.9 \
@@ -1123,6 +1124,30 @@ MLINKS+=epoch.9 epoch_context.9 \
 	epoch.9 epoch_call.9 \
 	epoch.9 epoch_drain_callbacks.9 \
 	epoch.9 in_epoch.9
+MLINKS+=eventlog.9 eventlog_provider_create.9 \
+	eventlog.9 eventlog_provider_destroy.9 \
+	eventlog.9 eventlog_provider_get_level.9 \
+	eventlog.9 eventlog_provider_get_keywords.9 \
+	eventlog.9 eventlog_provider_get_default.9 \
+	eventlog.9 eventlog_provider_set_default.9 \
+	eventlog.9 eventlog_provider_get_sysctl_node.9 \
+	eventlog.9 eventlog_provider_get_sysctl_ctx.9 \
+	eventlog.9 eventlog_session_create.9 \
+	eventlog.9 eventlog_session_destroy.9 \
+	eventlog.9 eventlog_session_set_enabled.9 \
+	eventlog.9 eventlog_session_is_enabled.9 \
+	eventlog.9 eventlog_session_set_filter.9 \
+	eventlog.9 eventlog_event_write.9 \
+	eventlog.9 eventlog_event_write_at.9 \
+	eventlog.9 eventlog_event_write_gather.9 \
+	eventlog.9 eventlog_event_write_gather_at.9 \
+	eventlog.9 eventlog_subscriber_create_device.9 \
+	eventlog.9 eventlog_subscriber_create_callback.9 \
+	eventlog.9 eventlog_subscriber_destroy.9 \
+	eventlog.9 eventlog_subscriber_add_subscription.9 \
+	eventlog.9 eventlog_subscriber_drain_dumps.9 \
+	eventlog.9 eventlog_subscriber_read.9 \
+	eventlog.9 eventlog_subscriber_get_stats.9
 MLINKS+=EVENTHANDLER.9 EVENTHANDLER_DECLARE.9 \
 	EVENTHANDLER.9 EVENTHANDLER_DEFINE.9 \
 	EVENTHANDLER.9 EVENTHANDLER_DEREGISTER.9 \

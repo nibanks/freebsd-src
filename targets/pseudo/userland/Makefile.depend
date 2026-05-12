@@ -16,6 +16,7 @@ DIRDEPS+= \
 	bin/domainname \
 	bin/echo \
 	bin/ed \
+	bin/elog \
 	bin/expr \
 	bin/freebsd-version \
 	bin/getfacl \

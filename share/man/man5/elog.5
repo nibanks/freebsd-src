@@ -1,0 +1,229 @@
+.\"
+.\" Copyright (c) 2026 Netflix, Inc.
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd March 19, 2026
+.Dt ELOG 5
+.Os
+.Sh NAME
+.Nm elog
+.Nd eventlog binary capture file format
+.Sh DESCRIPTION
+An
+.Nm
+file stores a captured sequence of kernel events produced by the
+.Xr eventlog 9
+framework.
+Files are created by the
+.Xr elog 1
+utility using the
+.Fl o
+option and can be read back with the
+.Fl r
+option.
+.Pp
+All multi-byte integer fields are in host-native byte order
+.Pq little-endian on amd64 and aarch64 .
+.Pp
+An
+.Nm
+file consists of three contiguous sections:
+.Bd -literal -offset indent
+[file header (40 bytes)]
+[provider table (4 + N*34 bytes)]
+[event stream]
+.Ed
+.Ss File Header
+The file header is 40 bytes, packed with no padding:
+.Bl -column "Offset" "Size" "uint64_t" "dropped_events" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 4 Ta Vt char[4] Ta Va magic
+.It 4 Ta 4 Ta Vt uint32_t Ta Va version
+.It 8 Ta 8 Ta Vt uint64_t Ta Va capture_start
+.It 16 Ta 8 Ta Vt uint64_t Ta Va start_utc_us
+.It 24 Ta 8 Ta Vt uint64_t Ta Va event_count
+.It 32 Ta 8 Ta Vt uint64_t Ta Va dropped_events
+.El
+.Pp
+The fields are:
+.Bl -tag -width indent
+.It Va magic
+The four ASCII bytes
+.Dq ELOG
+.Pq Li 0x45 0x4C 0x4F 0x47 .
+A consumer must verify this field before proceeding.
+.It Va version
+Format version number.
+The current version is 1.
+Unknown versions should be rejected.
+.It Va capture_start
+Timestamp of the first captured event, in microseconds since boot.
+.It Va start_utc_us
+UTC wall-clock time at capture start, in microseconds since the Unix epoch.
+Used together with
+.Va capture_start
+to convert event timestamps to UTC:
+.Bd -literal -offset indent
+utc_us = start_utc_us + (event.timestamp - capture_start)
+.Ed
+.It Va event_count
+Total number of events in the file.
+Written as 0 initially and updated by seeking back to the header when
+capture ends.
+May be 0 if the capturing tool was killed.
+.It Va dropped_events
+Number of events the kernel dropped due to full buffers during capture.
+Also updated when capture ends.
+.El
+.Pp
+The C structure is:
+.Bd -literal -offset indent
+struct elog_binary_header {
+	char     magic[4];
+	uint32_t version;
+	uint64_t capture_start;
+	uint64_t start_utc_us;
+	uint64_t event_count;
+	uint64_t dropped_events;
+} __packed;
+.Ed
+.Ss Provider Table
+Immediately after the file header, the provider table maps numeric
+.Va provider_id
+values found in event headers to human-readable provider names.
+.Pp
+The table starts with a 4-byte count:
+.Bl -column "Offset" "Size" "uint32_t" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 4 Ta Vt uint32_t Ta Va count
+.El
+.Pp
+This is followed by
+.Va count
+entries, each 34 bytes and packed:
+.Bl -column "Offset" "Size" "uint16_t" "provider_id" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 2 Ta Vt uint16_t Ta Va provider_id
+.It 2 Ta 32 Ta Vt char[32] Ta Va name
+.El
+.Pp
+The
+.Va name
+field is null-terminated and zero-padded to 32 bytes.
+Multiple entries may share the same name when multiple kernel subsystems
+register providers under the same name
+.Pq see Xr eventlog 9 .
+The maximum number of entries is 32
+.Pq Dv EVENTLOG_MAX_PROVIDERS .
+.Pp
+The total provider table size is
+.Li 4 + count * 34
+bytes.
+.Pp
+The C structure for each entry is:
+.Bd -literal -offset indent
+struct eventlog_provider_info {
+	uint16_t provider_id;
+	char     name[EVENTLOG_PROVIDER_NAME_MAX];
+} __packed;
+.Ed
+.Ss Event Stream
+The remainder of the file is a packed sequence of events in timestamp
+order.
+Each event consists of a 32-byte header followed by a variable-length
+payload:
+.Bd -literal -offset indent
+[header (32 bytes)][payload (0+ bytes)]
+.Ed
+.Pp
+Events are packed back-to-back with no inter-event padding.
+The event header layout is:
+.Bl -column "Offset" "Size" "uint64_t" "event_length" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 2 Ta Vt uint16_t Ta Va event_length
+.It 2 Ta 2 Ta Vt uint16_t Ta Va cpu
+.It 4 Ta 2 Ta Vt uint16_t Ta Va provider_id
+.It 6 Ta 2 Ta Vt uint16_t Ta (reserved)
+.It 8 Ta 8 Ta Vt uint64_t Ta Va timestamp
+.It 16 Ta 8 Ta Vt uint64_t Ta Va session_id
+.It 24 Ta 4 Ta Vt uint32_t Ta Va event_id
+.It 28 Ta 4 Ta Vt int32_t Ta Va thread_id
+.El
+.Pp
+The
+.Va event_length
+field gives the total event size in bytes, including the header.
+The minimum value is 32
+.Pq header only, no payload ;
+the maximum is 65535.
+A parser advances to the next event by adding
+.Va event_length
+to the current event's offset.
+.Pp
+The
+.Va provider_id
+maps to a provider name via the provider table.
+The
+.Va timestamp
+is in microseconds since boot; convert to UTC using the formula
+described in the file header section.
+The
+.Va session_id
+is provider-defined.
+The reserved field at offset 6 is written as zero and must be ignored.
+.Pp
+Two
+.Va event_id
+values are reserved across all providers:
+.Bl -column "EVENTLOG_SESSION_CREATE_ID" "0xFFFFFFFE" -offset indent
+.It Sy Constant Ta Sy Value Ta Sy Meaning
+.It Dv EVENTLOG_SESSION_CREATE_ID Ta Li 0xFFFFFFFE Ta Session created
+.It Dv EVENTLOG_SESSION_END_ID Ta Li 0xFFFFFFFF Ta Session destroyed
+.El
+.Pp
+The
+.Dv EVENTLOG_SESSION_END_ID
+event has an empty payload
+.Pq 0 bytes .
+All other payload formats are provider-specific and defined by schema files.
+The payload size is
+.Va event_length
+minus 32.
+.Pp
+The event stream may end with an incomplete event at EOF if the capture
+was interrupted.
+Parsers should stop when fewer than 32 bytes remain or when
+.Va event_length
+exceeds the remaining data.
+.Ss Compressed Files
+The
+.Xr elog 1
+utility also accepts
+.Pa .gz Ns -compressed
+files
+.Pq detected by file extension .
+The decompressed content has the same format described above.
+.Sh EXAMPLES
+Capture TCP events to a binary file:
+.Bd -literal -offset indent
+elog -c tcp -o /tmp/events.elog
+.Ed
+.Pp
+Read back as formatted text:
+.Bd -literal -offset indent
+elog -r /tmp/events.elog
+.Ed
+.Pp
+Read a compressed capture:
+.Bd -literal -offset indent
+elog -r /tmp/events.elog.gz
+.Ed
+.Sh SEE ALSO
+.Xr elog 1 ,
+.Xr eventlog 9
+.Sh HISTORY
+The
+.Nm
+file format first appeared in
+.Fx 16.0 .

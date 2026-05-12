@@ -1,0 +1,1097 @@
+.\"
+.\" Copyright (c) 2026 Netflix, Inc.
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd May 11, 2026
+.Dt EVENTLOG 9
+.Os
+.Sh NAME
+.Nm eventlog
+.Nd subscription-based kernel event logging framework
+.Sh SYNOPSIS
+.In sys/eventlog.h
+.Ft "struct eventlog_provider *"
+.Fo eventlog_provider_create
+.Fa "const char *name"
+.Fa "eventlog_provider_dump_state_t dump_callback"
+.Fa "void *dump_callback_arg"
+.Fa "eventlog_default_changed_t default_changed"
+.Fa "void *default_changed_arg"
+.Fc
+.Ft void
+.Fo eventlog_provider_destroy
+.Fa "struct eventlog_provider *provider"
+.Fc
+.Ft "enum eventlog_level"
+.Fo eventlog_provider_get_level
+.Fa "struct eventlog_provider *provider"
+.Fc
+.Ft uint32_t
+.Fo eventlog_provider_get_keywords
+.Fa "struct eventlog_provider *provider"
+.Fc
+.Ft int
+.Fo eventlog_provider_get_default
+.Fa "struct eventlog_provider *provider"
+.Fc
+.Ft void
+.Fo eventlog_provider_set_default
+.Fa "struct eventlog_provider *provider"
+.Fa "int value"
+.Fc
+.Ft "struct sysctl_oid *"
+.Fo eventlog_provider_get_sysctl_node
+.Fa "struct eventlog_provider *provider"
+.Fc
+.Ft "struct sysctl_ctx_list *"
+.Fo eventlog_provider_get_sysctl_ctx
+.Fa "struct eventlog_provider *provider"
+.Fc
+.Ft "struct eventlog_session *"
+.Fo eventlog_session_create
+.Fa "struct eventlog_provider *provider"
+.Fa "uint64_t session_id"
+.Fa "bool waitok"
+.Fa "void *create_payload"
+.Fa "size_t create_payload_size"
+.Fc
+.Ft void
+.Fo eventlog_session_destroy
+.Fa "struct eventlog_session *session"
+.Fc
+.Ft void
+.Fo eventlog_session_set_enabled
+.Fa "struct eventlog_session *session"
+.Fa "int enabled"
+.Fc
+.Ft int
+.Fo eventlog_session_is_enabled
+.Fa "struct eventlog_session *session"
+.Fc
+.Ft void
+.Fo eventlog_session_set_filter
+.Fa "struct eventlog_session *session"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fc
+.Ft void
+.Fo eventlog_event_write
+.Fa "struct eventlog_session *session"
+.Fa "uint32_t id"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fa "void *buffer"
+.Fa "size_t length"
+.Fc
+.Ft void
+.Fo eventlog_event_write_at
+.Fa "struct eventlog_session *session"
+.Fa "uint32_t id"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fa "void *buffer"
+.Fa "size_t length"
+.Fa "uint64_t timestamp_us"
+.Fc
+.Ft void
+.Fo eventlog_event_write_gather
+.Fa "struct eventlog_session *session"
+.Fa "uint32_t id"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fa "const struct iovec *iov"
+.Fa "int iovcnt"
+.Fc
+.Ft void
+.Fo eventlog_event_write_gather_at
+.Fa "struct eventlog_session *session"
+.Fa "uint32_t id"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fa "const struct iovec *iov"
+.Fa "int iovcnt"
+.Fa "uint64_t timestamp_us"
+.Fc
+.In sys/eventlog_subscriber.h
+.Ft "struct eventlog_subscriber *"
+.Fo eventlog_subscriber_create_device
+.Fa "uint32_t buffer_size_per_cpu"
+.Fc
+.Ft "struct eventlog_subscriber *"
+.Fo eventlog_subscriber_create_callback
+.Fa "eventlog_callback_t callback"
+.Fa "void *callback_arg"
+.Fc
+.Ft void
+.Fo eventlog_subscriber_destroy
+.Fa "struct eventlog_subscriber *subscriber"
+.Fc
+.Ft int
+.Fo eventlog_subscriber_add_subscription
+.Fa "struct eventlog_subscriber *subscriber"
+.Fa "const char *provider_name"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fc
+.Ft void
+.Fo eventlog_subscriber_drain_dumps
+.Fa "struct eventlog_subscriber *subscriber"
+.Fc
+.Ft int
+.Fo eventlog_subscriber_read
+.Fa "struct eventlog_subscriber *subscriber"
+.Fa "struct uio *uio"
+.Fa "int flags"
+.Fc
+.Ft void
+.Fo eventlog_subscriber_get_stats
+.Fa "struct eventlog_subscriber *subscriber"
+.Fa "struct eventlog_stats *stats"
+.Fc
+.Sh DESCRIPTION
+The
+.Nm
+framework provides a subscription-based event logging system for the
+.Fx
+kernel.
+It enables kernel subsystems
+.Pq providers
+to emit structured events that can be captured by user-space tools or
+kernel callbacks
+.Pq subscribers
+with fine-grained filtering based on provider name, keyword bitmask, and
+log level.
+.Pp
+A single character device,
+.Pa /dev/eventlog ,
+handles all event subscriptions and delivery.
+Providers are only enabled when active subscribers exist, ensuring zero
+overhead when no one is listening.
+.Pp
+The framework is designed around the following principles:
+.Bl -bullet -compact
+.It
+Single system-wide device for all providers and subscribers.
+.It
+Subscription-based model with zero overhead when idle.
+.It
+Multi-provider support: multiple subsystems register under the same name
+and subscriptions automatically cover all matching providers.
+.It
+Per-subscriber filtering by log level and keyword bitmask.
+.It
+Lock-free per-CPU double-buffering for device subscribers.
+.It
+Timestamp-ordered event delivery across CPUs.
+.El
+.Ss Log Levels
+Events are classified by severity using the
+.Vt "enum eventlog_level"
+type.
+Higher numeric values are more verbose:
+.Bl -column "EVENTLOG_LEVEL_VERBOSE" "Value" -offset indent
+.It Sy Constant Ta Sy Value
+.It Dv EVENTLOG_LEVEL_NONE Ta 0
+.It Dv EVENTLOG_LEVEL_ERROR Ta 1
+.It Dv EVENTLOG_LEVEL_WARN Ta 2
+.It Dv EVENTLOG_LEVEL_INFO Ta 3
+.It Dv EVENTLOG_LEVEL_VERBOSE Ta 4
+.It Dv EVENTLOG_LEVEL_TRACE Ta 5
+.El
+.Pp
+Subscribing at a given level receives all events at that level and below
+.Pq less verbose .
+For example, subscribing at
+.Dv EVENTLOG_LEVEL_VERBOSE
+receives ERROR, WARN, INFO, and VERBOSE events but not TRACE.
+.Ss Providers
+A provider is a kernel subsystem that emits events.
+Providers are created with
+.Fn eventlog_provider_create ,
+which registers the provider under a given
+.Fa name
+and assigns it a unique
+.Va provider_id
+.Pq 1-based .
+The
+.Va provider_id
+is embedded in every event header.
+.Pp
+Multiple subsystems may register providers with the same name.
+For example, both the default TCP stack and the RACK TCP stack register
+providers named
+.Dq tcp :
+.Bd -literal -offset indent
+/* Default TCP stack */
+provider = eventlog_provider_create("tcp",
+    tcp_eventlog_dump_state, NULL,
+    tcp_eventlog_default_changed, NULL);
+
+/* RACK TCP stack */
+provider = eventlog_provider_create("tcp",
+    tcp_eventlog_dump_state, NULL,
+    tcp_eventlog_default_changed, NULL);
+.Ed
+.Pp
+When a subscriber subscribes by name, the subscription is applied to
+.Em all
+providers matching that name.
+Each provider instance gets its own unique
+.Va provider_id ,
+allowing consumers to distinguish which instance emitted a given event.
+.Pp
+The
+.Fn eventlog_provider_destroy
+function unregisters a provider.
+It synchronizes with the dump state lock to ensure no dump callback is
+in-flight when the provider is freed.
+.Pp
+The
+.Fn eventlog_provider_get_level
+and
+.Fn eventlog_provider_get_keywords
+functions return the current aggregate level and keyword mask computed
+from all active subscribers.
+These are primarily useful for testing and debugging.
+.Pp
+The
+.Fn eventlog_provider_get_default
+function returns the current default enablement setting for a provider
+.Pq 0 or 1 .
+The
+.Fn eventlog_provider_set_default
+function sets this value programmatically without iterating existing sessions.
+.Ss Shared Statistics
+All providers sharing the same name share a single
+.Vt eventlog_provider_stats
+structure, which owns the
+.Xr sysctl 9
+counters and the
+.Va default
+setting.
+This provides a single aggregated view under
+.Li kern.eventlog. Ns Ao Ar name Ac Ns Li .* :
+.Bl -column "kern.eventlog.<name>.sessions_created" -offset indent
+.It Li kern.eventlog. Ns Ao Ar name Ac Ns Li .sessions_created
+.It Li kern.eventlog. Ns Ao Ar name Ac Ns Li .sessions_active
+.It Li kern.eventlog. Ns Ao Ar name Ac Ns Li .sessions_enabled
+.It Li kern.eventlog. Ns Ao Ar name Ac Ns Li .default
+.El
+.Pp
+The
+.Li default
+sysctl controls whether new sessions start enabled or disabled.
+The initial value is 0
+.Pq disabled ,
+but can be overridden at boot via loader tunable
+.Pq e.g., Li kern.eventlog.tcp.default=1 No in Pa /boot/loader.conf
+or programmatically via
+.Fn eventlog_provider_set_default .
+It accepts four values:
+.Bl -tag -width indent
+.It 0
+New sessions start disabled.
+Sessions can be individually enabled later.
+.It 1
+New sessions start enabled.
+.It \-1
+Disable all currently active sessions across all providers with this
+name, then set the default to 0.
+For providers that register a
+.Fa default_changed
+callback, the framework skips the session iteration and defers it to
+the callback.
+.It 2
+Enable all currently disabled sessions across all providers with this
+name, then set the default to 1.
+For providers that register a
+.Fa default_changed
+callback, the framework skips the session iteration and defers it to
+the callback.
+.El
+.Pp
+The stats structure is reference-counted: created when the first provider
+with a given name is registered, shared when subsequent same-named
+providers are created, and freed when the last provider with that name
+is destroyed.
+.Ss Extending The Provider Sysctl Node
+Providers that need a handful of provider-specific knobs
+.Pq e.g., a sampling rate
+can hang additional
+.Xr sysctl 9
+children off the auto-generated
+.Li kern.eventlog. Ns Ao Ar name Ac
+node rather than creating a parallel
+.Li kern. Ns Ao Ar name Ac
+tree.
+Two accessors expose the node and its
+.Vt sysctl_ctx_list
+for this purpose:
+.Pp
+.Bl -tag -width Ds -compact
+.It Fn eventlog_provider_get_sysctl_node
+Returns the
+.Vt "struct sysctl_oid *"
+for
+.Li kern.eventlog. Ns Ao Ar name Ac .
+.It Fn eventlog_provider_get_sysctl_ctx
+Returns the
+.Vt "struct sysctl_ctx_list *"
+owned by the framework for this provider name.
+.El
+.Pp
+Children added via these handles are freed automatically when the last
+provider with the same name is destroyed, so callers should only register
+children whose backing storage is valid for the lifetime of the provider.
+For example, a provider with a tunable sampling rate could publish it as
+.Li kern.eventlog. Ns Ao Ar name Ac Ns Li .hz :
+.Bd -literal -offset indent
+provider = eventlog_provider_create("myprov", &cfg);
+
+SYSCTL_ADD_INT(
+    eventlog_provider_get_sysctl_ctx(provider),
+    SYSCTL_CHILDREN(eventlog_provider_get_sysctl_node(provider)),
+    OID_AUTO, "hz", CTLFLAG_RW, &my_hz, 0,
+    "Samples per CPU per second");
+.Ed
+.Ss Dump State Callback
+When a subscriber subscribes for the first time to a provider that
+registered a
+.Fa dump_callback ,
+the framework schedules an asynchronous dump on its private
+.Dq eventlog_dump
+taskqueue.
+The callback emits current state for all of the provider's existing sessions
+so the new subscriber observes sessions that were created before it started
+listening.
+.Pp
+The callback runs on a dedicated framework taskqueue thread after
+.Fn eventlog_subscriber_add_subscription
+has already returned to the caller, so it must not depend on any per-thread
+state of the subscribing thread (e.g.
+.Va curthread->td_vnet ,
+.Va curthread->td_proc ) ;
+providers that need a vnet context must establish one themselves with
+.Fn VNET_FOREACH /
+.Fn CURVNET_SET .
+The callback should use normal event write functions or schema-generated
+.Ql _LOG
+macros; the framework automatically routes those writes to only the
+subscriber that requested this dump.
+.Pp
+The dump taskqueue is single-threaded, so a provider's
+.Fa dump_callback
+is never invoked concurrently with itself or with any other dump_callback.
+Re-subscribing an already-subscribed provider does
+.Em not
+re-fire the dump (the subscriber already has the state); only a brand-new
+subscription enqueues a task.
+.Pp
+If
+.Fa dump_callback
+is
+.Dv NULL ,
+no task is enqueued.
+With multi-provider support a separate task is enqueued for each matching
+provider when subscribing by name.
+.Pp
+Once
+.Fa dump_callback
+returns the framework synthesises a single
+.Dv EVENTLOG_DUMP_COMPLETE_ID
+event for the requesting subscriber.
+The event carries the dumping provider's id, a session id of zero, and an
+empty payload, and is filtered with the same
+.Dv EVENTLOG_LEVEL_INFO
++
+.Dv EVENTLOG_KEYWORD_SESSION
+contract that gates
+.Dv EVENTLOG_SESSION_CREATE_ID
+and
+.Dv EVENTLOG_SESSION_END_ID :
+subscribers that opted out of the session keyword bit do not receive it.
+Userspace consumers can key on
+.Dv EVENTLOG_DUMP_COMPLETE_ID
+to know that all replay events for the just-subscribed provider have
+been delivered.
+.Pp
+Callers that need to observe a self-consistent post-dump state before
+proceeding (test code, save-state tools) should call
+.Fn eventlog_subscriber_drain_dumps
+after subscribing; it blocks until every dump task this subscriber has
+outstanding has finished.
+.Fn eventlog_subscriber_destroy
+implicitly drains, so callers do not have to coordinate teardown with
+in-flight dumps.
+.Ss Default Changed Callback
+When the
+.Li kern.eventlog. Ns Ao Ar name Ac Ns Li .default
+sysctl is written, the framework invokes the optional
+.Fa default_changed
+callback on each provider that shares the name.
+The callback receives the raw sysctl value:
+.Bl -tag -width indent
+.It 0 No or 1
+Informational only.
+The framework has updated the stored default.
+.It \-1 No or 2
+The framework does
+.Em not
+iterate sessions for providers that have a
+.Fa default_changed
+callback; the provider is responsible for enabling or disabling its own
+sessions.
+For providers without a callback, the framework iterates sessions itself.
+.El
+.Pp
+The callback is invoked outside any eventlog lock; the provider may take
+its own locks.
+.Ss Provider Enablement
+Each provider instance is enabled or disabled independently based on its
+subscribers.
+Keywords are OR'd across all subscribers for that provider instance.
+The level is set to the most verbose level requested by any subscriber.
+For example, if subscriber A requests INFO with keywords 0x1 and
+subscriber B requests WARN with keywords 0x2, the provider is enabled at
+INFO with keywords 0x3.
+.Ss Sessions
+A session represents a single entity being observed, such as one TCP
+connection.
+Sessions are created with
+.Fn eventlog_session_create ,
+which allocates a session from a UMA zone and associates it with a
+provider.
+The
+.Fa session_id
+is a provider-assigned 64-bit identifier
+.Pq e.g., Va inp_gencnt No for TCP
+that is embedded in every event header.
+The meaning of
+.Fa session_id
+values is provider-defined.
+.Pp
+If
+.Fa waitok
+is true, allocations use
+.Dv M_WAITOK ;
+otherwise
+.Dv M_NOWAIT
+is used and the function may return
+.Dv NULL .
+.Pp
+The optional
+.Fa create_payload
+is provider-specific data included in the
+.Dv EVENTLOG_SESSION_CREATE_ID
+event emitted at session creation.
+If
+.Dv NULL ,
+a default payload containing only the creation timestamp is used.
+.Pp
+The session's initial enabled state is derived from the provider's
+.Li default
+sysctl.
+The
+.Dv EVENTLOG_SESSION_CREATE_ID
+event is only emitted when the session is enabled.
+.Pp
+The public session structure exposes two fields for use by the
+schema-generated
+.Ql _ENABLED
+macros:
+.Bd -literal -offset indent
+struct eventlog_session {
+	enum eventlog_level effective_level;
+	uint32_t effective_keywords;
+};
+.Ed
+.Pp
+The
+.Fn eventlog_session_set_enabled
+function enables or disables a session.
+When disabled,
+.Va effective_level
+is set to
+.Dv EVENTLOG_LEVEL_NONE
+so that
+.Ql _ENABLED
+checks fail with no function call overhead.
+.Pp
+The
+.Fn eventlog_session_set_filter
+function sets a per-session level and keyword override.
+When set, effective values use this override instead of the provider's
+aggregate values.
+Call
+.Fn eventlog_session_set_enabled
+after setting the filter to apply it.
+.Pp
+The
+.Fn eventlog_session_destroy
+function destroys a session and emits an
+.Dv EVENTLOG_SESSION_END_ID
+event if the session was enabled.
+.Ss Subscribers
+Subscribers are entities that receive events.
+There are two types:
+.Bl -tag -width indent
+.It Sy Device subscribers
+Created with
+.Fn eventlog_subscriber_create_device .
+These use per-CPU double-buffered storage with configurable buffer size
+.Pq Dv EVENTLOG_BUFFER_SIZE_MIN No to Dv EVENTLOG_BUFFER_SIZE_MAX .
+Events are read via
+.Fn eventlog_subscriber_read ,
+which merges events across CPUs by timestamp using a min-heap.
+Device subscribers can serve both user-space and kernel readers.
+.It Sy Callback subscribers
+Created with
+.Fn eventlog_subscriber_create_callback .
+Events are delivered directly to the callback function with no buffering.
+This provides the lowest latency but the callback must execute quickly
+as it runs in the context of the event writer.
+The callback function type is:
+.Bd -literal -offset indent
+typedef void (*eventlog_callback_t)(
+    const struct eventlog_event_header *hdr,
+    const char *provider_name,
+    uint8_t provider_name_len,
+    uint64_t session_id,
+    const struct iovec *iov,
+    int iovcnt,
+    size_t payload_size,
+    void *callback_arg);
+.Ed
+.El
+.Pp
+The
+.Fn eventlog_subscriber_add_subscription
+function subscribes to a named provider.
+If the provider name matches multiple provider instances, a separate
+internal subscription is created for each, but this is transparent to
+the caller.
+For every newly-subscribed provider that registered a
+.Fa dump_callback
+the framework schedules an asynchronous dump on the eventlog_dump
+taskqueue;
+see
+.Sx Dump State Callback .
+.Pp
+The
+.Fn eventlog_subscriber_drain_dumps
+function blocks the caller until every dump task this subscriber has
+outstanding has finished.
+.Pp
+The
+.Fn eventlog_subscriber_destroy
+function removes all subscriptions, frees resources, and updates
+provider enablement.
+It implicitly drains any pending dumps before freeing memory, so callers
+do not have to coordinate destroy with in-flight dumps.
+.Pp
+The
+.Fn eventlog_subscriber_get_stats
+function fills the
+.Fa stats
+structure with current subscriber statistics including
+.Va dropped_events .
+.Ss Event Writing
+Events are emitted using
+.Fn eventlog_event_write
+or
+.Fn eventlog_event_write_at .
+Both functions construct a 32-byte event header on the stack and deliver
+the event to all subscribers that match the provider, level, and keyword
+criteria.
+.Pp
+The
+.Fn eventlog_event_write_at
+variant accepts a pre-computed timestamp in microseconds since boot,
+for use when the caller has already queried the time.
+.Pp
+In practice, events are typically emitted via schema-generated macros
+rather than calling these functions directly.
+See
+.Sx SCHEMA-BASED CODE GENERATION
+below.
+.Ss Scatter/Gather Event Writing
+For events that carry a variable-length payload, the
+.Fn eventlog_event_write_gather
+and
+.Fn eventlog_event_write_gather_at
+variants accept the payload as an
+.Vt iovec
+of
+.Fa iovcnt
+segments.
+The framework prepends the 32-byte header and copies the concatenation
+of every segment into each subscriber's ring buffer as part of the same
+reserve step, so readers never observe a partially written event.
+A zero segment count or any zero-length entry is legal.
+.Pp
+These variants are the preferred shape when a producer has a fixed head
+followed by a variable-length tail: the caller builds a two-element iov
+referring to its own source buffers directly, avoiding an intermediate
+copy and the worst-case stack footprint of a composite struct.
+.Pp
+The schema generator emits calls to
+.Fn eventlog_event_write_gather
+for STRUCTs that declare a trailing varlen field.
+Scalar callers can keep using
+.Fn eventlog_event_write ;
+internally it builds a one-element iov and takes the same write path,
+so the two entry points deliver byte-identical events on the wire.
+.Pp
+Callback subscribers receive the payload in scatter/gather form: the
+callback signature is
+.Pp
+.Bd -literal -offset indent
+typedef void (*eventlog_callback_t)(
+    const struct eventlog_event_header *hdr,
+    const char *provider_name, uint8_t provider_name_len,
+    uint64_t session_id,
+    const struct iovec *iov, int iovcnt, size_t payload_size,
+    void *callback_arg);
+.Ed
+.Pp
+Delivery happens inside an
+.Xr smr 9
+critical section where
+.Xr malloc 9
+is not permitted, which is why the framework does not compact iov
+segments into a flat buffer.
+For scalar producers
+.Fa iovcnt
+is 1 and the payload is simply
+.Fa iov[0].iov_base .
+For producers that use
+.Fn eventlog_event_write_gather
+(the usual shape for schema-generated varlen events), the callback either
+walks the segments in order or
+.Xr memcpy 3 Ns s
+them into a caller-sized buffer.
+The
+.Fa iov
+and
+.Fa iov[*].iov_base
+pointers are only valid for the duration of the callback; callbacks must
+not retain them.
+.Pp
+Device subscribers are unaffected by this: iov segments are copied
+straight from the caller's buffers into the per-CPU ring, up to the
+wire-format
+.Dv UINT16_MAX
+.Va event_length
+cap.
+.Ss Event Write Path
+The event write path is designed for minimal overhead:
+.Bl -enum -compact
+.It
+The schema-generated
+.Ql _LOG
+macro first calls
+.Ql _ENABLED ,
+which checks the session's
+.Va effective_level
+and
+.Va effective_keywords
+fields directly with no function call.
+If disabled, the macro returns immediately.
+.It
+If enabled, the event structure is initialized on the stack and
+.Fn eventlog_event_write
+is called.
+.It
+The function enters an SMR critical section via
+.Fn smr_enter ,
+which disables thread preemption and pins the thread to the current CPU.
+This rules out thread-level writer-vs-writer contention; a hardware NMI on
+the same CPU can still nest inside the writer (see
+.Sx Per-CPU Buffering ) .
+.It
+All active subscribers are iterated under SMR protection
+.Pq no locks .
+For each matching subscriber, the event is routed by type:
+device subscribers receive a buffer write; callback subscribers receive
+a direct function invocation.
+.It
+The SMR critical section is exited via
+.Fn smr_exit .
+.El
+.Ss Event Format
+Each event is a contiguous byte sequence consisting of a 32-byte header
+followed by a variable-length payload.
+All multi-byte integer fields are in host-native byte order
+.Pq little-endian on amd64 and aarch64 .
+Events are packed back-to-back with no inter-event padding.
+.Pp
+The event header layout is:
+.Bl -column "Offset" "Size" "uint64_t" "event_length" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 2 Ta Vt uint16_t Ta Va event_length
+.It 2 Ta 2 Ta Vt uint16_t Ta Va cpu
+.It 4 Ta 2 Ta Vt uint16_t Ta Va provider_id
+.It 6 Ta 2 Ta Vt uint16_t Ta (reserved)
+.It 8 Ta 8 Ta Vt uint64_t Ta Va timestamp
+.It 16 Ta 8 Ta Vt uint64_t Ta Va session_id
+.It 24 Ta 4 Ta Vt uint32_t Ta Va event_id
+.It 28 Ta 4 Ta Vt int32_t Ta Va thread_id
+.El
+.Pp
+The
+.Va event_length
+field gives the total event size in bytes
+.Pq header + payload .
+The minimum value is 32
+.Pq header only ;
+the maximum is 65535.
+The
+.Va timestamp
+is in microseconds since boot, obtained via
+.Fn binuptime
+and converted with
+.Fn bintime2us .
+The
+.Va session_id
+is provider-defined.
+The
+.Va thread_id
+is the kernel thread ID
+.Pq Vt lwpid_t ;
+0 if no thread context.
+.Pp
+Two
+.Va event_id
+values are reserved for session lifecycle events emitted by the framework:
+.Bl -column "EVENTLOG_SESSION_CREATE_ID" "0xFFFFFFFE" -offset indent
+.It Sy Constant Ta Sy Value Ta Sy Meaning
+.It Dv EVENTLOG_SESSION_CREATE_ID Ta Li 0xFFFFFFFE Ta Session created
+.It Dv EVENTLOG_SESSION_END_ID Ta Li 0xFFFFFFFF Ta Session destroyed
+.El
+.Pp
+These use the keyword
+.Dv EVENTLOG_KEYWORD_SESSION
+.Pq Li 0x80000000
+and level
+.Dv EVENTLOG_LEVEL_INFO .
+The payload format is described in the provider's schema;
+.Dv EVENTLOG_SESSION_END_ID
+has an empty payload.
+.Pp
+The payload immediately follows the header with no padding.
+Its size is
+.Va event_length
+minus 32 bytes and its format is provider-specific, defined by schema files.
+.Ss Per-CPU Buffering
+Device subscribers use per-CPU double-buffering.
+Each CPU has two buffers per subscriber: an active buffer where writers
+append events, and a reader buffer where the reader consumes events.
+.Pp
+All writer-side mutable state and the reader buffer length are packed
+into a single 64-bit word
+.Pq Va packed_state
+with the following bit layout:
+.Bl -column "Bits [63:32]" "swap_allowed" -offset indent
+.It Sy Bits Ta Sy Field Ta Sy Description
+.It Li [63:32] Ta Va reader_len Ta Bytes in reader buffer (set at swap, 30 bits)
+.It Li [31:2] Ta Va commit_pos Ta Byte offset of next write (30 bits)
+.It Li [1] Ta Va swap_allowed Ta Reader has drained; writers may swap
+.It Li [0] Ta Va active_buf Ta Which buffer is active (0 or 1)
+.El
+.Pp
+On targets where the MI
+.Fn atomic_*_64
+API is available
+.Pq Dv __LP64__ , i.e.\& every 64-bit architecture ,
+every state transition (writer commit, buffer swap, reader drain) is a
+single
+.Fn atomic_fcmpset_64 ;
+the path is lock-free and NMI-safe by construction.
+.Pp
+On 32-bit targets that do not provide
+.Fn atomic_*_64
+(FreeBSD's
+.Pa sys/atomic_common.h
+gates
+.Fn atomic_load_64
+on
+.Dv __LP64__
+for the same reason),
+.Va packed_state
+is the same 64-bit word but every state operation takes a per-pcpu_buf
+.Dv MTX_SPIN
+that serialises access to the otherwise non-atomic 64-bit field.
+NMI-safety is provided up-front: the writer entry point
+.Fn eventlog_subscriber_write_event_device
+calls
+.Fn mtx_owned "&pcpu_buf->swap_lock"
+and drops the event if true.
+In NMI context
+.Va curthread
+is the interrupted thread, so
+.Fn mtx_owned
+is true exactly when an NMI fired on a thread that already holds the
+swap lock; calling
+.Fn mtx_lock_spin
+in that case would deadlock the NMI handler against the interrupted
+thread, so dropping the event (counted in
+.Va dropped_events )
+is the only safe choice.
+.Pp
+Because
+.Fn smr_enter
+disables thread preemption and pins the thread to a CPU, no two threads
+can write the same per-CPU buffer concurrently.
+A hardware NMI on the same CPU can still nest inside an in-progress
+thread-level writer (NMIs are not blocked by critical sections), so the
+commit-CAS retry loop re-derives
+.Va active
+and
+.Va commit_pos
+from the post-CAS state on every failure and redoes the write at the new
+offset; an NMI's intervening commit (with or without a buffer swap) is
+therefore preserved.
+.Pp
+Buffer swap publishes the frozen
+.Va commit_pos
+as
+.Va reader_len
+and flips
+.Va active_buf .
+A reader observing
+.Va swap_allowed = 0
+is guaranteed to see the matching
+.Va reader_len > 0 .
+Writers perform a proactive swap when the active buffer is full and
+.Va swap_allowed
+is set; otherwise the event is dropped and the subscriber's
+.Va dropped_events
+counter is incremented.
+The reader swaps buffers when it needs data.
+Writers never spin waiting for the reader.
+.Ss Timestamp Epoch Boundary
+Each
+.Fn read
+call delivers events bounded by a per-read epoch.
+After the initial buffer swap, the reader captures a
+.Va read_timestamp .
+Events with timestamps beyond this epoch remain in the reader buffer
+for the next
+.Fn read
+call.
+.Pp
+During the merge loop, events are delivered in strict timestamp order
+using a min-heap of CPUs sorted by next-event timestamp.
+When an epoch boundary is hit, a resweep of idle CPUs catches events
+from writers that committed within the epoch but whose CPU was previously
+inactive.
+.Ss Schema-Based Code Generation
+Provider-specific event schemas are defined in
+.Pa include/eventlog/
+using
+.Pa .src
+files with the naming convention
+.Ao Ar provider Ac Ns Pa _eventlog_schema.src .
+The
+.Pa eventlog_gen.awk
+script processes these files in two modes:
+.Bl -tag -width indent
+.It Sy Producer mode Pq Fl h
+Generates event structure definitions,
+.Ql _ENABLED()
+check macros,
+.Ql _LOG()
+macros
+.Pq with enablement check ,
+and
+.Ql _LOG_ALWAYS()
+macros
+.Pq unconditional .
+.It Sy Consumer mode Pq Fl c
+Generates payload formatters, enum and flag lookup functions, and
+.Fn event_id_to_name
+dispatch functions for user-space tools.
+.El
+.Pp
+The generated code follows this pattern:
+.Bd -literal -offset indent
+#define TCP_EVENTLOG_IN_ENABLED(__session) \e
+    ((__session) != NULL && \e
+     (__session)->effective_level >= EVENTLOG_LEVEL_VERBOSE && \e
+     ((__session)->effective_keywords & TCP_EVENTLOG_KEYWORD_RX))
+
+#define TCP_EVENTLOG_IN_LOG(__session, ...) \e
+    do { \e
+        if (TCP_EVENTLOG_IN_ENABLED(__session)) \e
+            TCP_EVENTLOG_IN_LOG_ALWAYS(__session, ...); \e
+    } while (0)
+.Ed
+.Pp
+The enablement check reads two structure fields directly with no
+function call and no lock, making the fast path when disabled a single
+branch that is not taken.
+.Ss Device Interface
+The
+.Pa /dev/eventlog
+character device supports the following operations:
+.Bl -tag -width indent
+.It Fn open
+Opens the device.
+No subscriber is created at this point.
+The framework is host-global and is not exposed to jailed processes:
+.Fn open
+fails with
+.Er EPERM
+when the calling thread is in a jail
+.Pq Va cr_prison No is not Va prison0 .
+.It Fn close
+Destroys the subscriber if one was created, and updates provider
+enablement.
+.It Fn read
+Reads events merged by timestamp across per-CPU buffers.
+Each
+.Fn read
+returns zero or more complete events; no partial events are delivered.
+Blocks for up to one second if no data is available, unless
+.Dv FNONBLOCK
+is set.
+.It Fn ioctl
+Manages subscriptions and buffer configuration using the following
+commands:
+.Bl -tag -width indent
+.It Dv EVENTLOG_IOCTL_CREATE_SIZE Ns Pq Fa count
+Creates a subscriber with the specified per-CPU buffer size and
+subscribes to providers in one atomic operation.
+The argument is a variable-length
+.Vt "struct eventlog_create_req" .
+.It Dv EVENTLOG_IOCTL_DESTROY
+Unsubscribes from all providers and destroys the subscriber.
+.It Dv EVENTLOG_IOCTL_GET_STATS
+Returns the subscriber's
+.Va dropped_events
+count.
+.It Dv EVENTLOG_IOCTL_GET_PROVIDERS
+Returns the list of subscribed providers with their numeric IDs and
+names.
+Multiple entries may share the same name when multi-provider support
+is in use.
+.El
+.El
+.Ss Initialization
+The framework initializes in three boot-time phases:
+.Bl -enum -compact
+.It
+Mutexes are initialized at
+.Dv SI_SUB_LOCK .
+.It
+The session UMA zone is created at
+.Dv SI_SUB_KMEM .
+.It
+The
+.Pa /dev/eventlog
+character device is created at
+.Dv SI_SUB_DRIVERS .
+.El
+.Pp
+Providers register themselves during their own subsystem initialization.
+.Sh RETURN VALUES
+The
+.Fn eventlog_provider_create
+function returns a pointer to the new provider, or
+.Dv NULL
+on failure.
+.Pp
+The
+.Fn eventlog_session_create
+function returns a pointer to the new session, or
+.Dv NULL
+if allocation fails
+.Pq when Fa waitok No is false .
+.Pp
+The
+.Fn eventlog_provider_get_default
+function returns 0
+.Pq sessions start disabled
+or 1
+.Pq sessions start enabled .
+.Pp
+The
+.Fn eventlog_provider_get_sysctl_node
+and
+.Fn eventlog_provider_get_sysctl_ctx
+functions return the provider's auto-generated
+.Xr sysctl 9
+node and its backing context, which are owned by the framework.
+Both always succeed for a valid provider.
+.Pp
+The
+.Fn eventlog_session_is_enabled
+function returns non-zero if the session is enabled, or 0 if disabled or
+.Dv NULL .
+.Pp
+The
+.Fn eventlog_provider_get_level
+function returns the current aggregate log level.
+.Pp
+The
+.Fn eventlog_provider_get_keywords
+function returns the current aggregate keyword mask.
+.Pp
+The
+.Fn eventlog_subscriber_create_device
+and
+.Fn eventlog_subscriber_create_callback
+functions return a pointer to the new subscriber, or
+.Dv NULL
+on failure.
+.Pp
+The
+.Fn eventlog_subscriber_add_subscription
+function returns 0 on success or an error code on failure.
+.Pp
+The
+.Fn eventlog_subscriber_read
+function returns 0 on success or an error code on failure.
+It returns
+.Er EAGAIN
+when no data is available and
+.Dv FNONBLOCK
+is set.
+.Sh ERRORS
+.Fn open
+on
+.Pa /dev/eventlog
+may fail with:
+.Bl -tag -width Er
+.It Bq Er EPERM
+The calling thread is in a jail
+.Pq Va cr_prison No is not Va prison0 .
+The eventlog framework is host-global and is not exposed to jailed
+processes.
+.It Bq Er ENODEV
+The device was opened with
+.Dv FWRITE ,
+.Dv FEXEC ,
+.Dv FAPPEND ,
+or
+.Dv O_TRUNC .
+The device is read-only.
+.El
+.Sh SEE ALSO
+.Xr elog 1 ,
+.Xr elog 5 ,
+.Xr tcp 4 ,
+.Xr smr 9 ,
+.Xr sysctl 9 ,
+.Xr tcp_functions 9
+.Sh HISTORY
+The
+.Nm
+framework first appeared in
+.Fx 16.0 .
+.Sh AUTHORS
+The
+.Nm
+framework was developed by
+.An Netflix, Inc .
