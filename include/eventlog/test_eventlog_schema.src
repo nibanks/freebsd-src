@@ -1,0 +1,59 @@
+/*
+ * Copyright (c) 2026 Netflix, Inc.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+/*
+ * This file defines the schema for test event logging.
+ * It is processed by eventlog_gen.awk to generate the event log header
+ * for testing purposes.
+ */
+
+PROVIDER test
+
+KEYWORD BASIC       1
+KEYWORD ADVANCED    2
+KEYWORD COMPLEX     4
+
+ENUM test_status
+    0:INIT
+    1:RUNNING
+    2:SUCCESS
+    3:FAILED
+
+FLAG test_flags
+    0x01:FLAG_A
+    0x02:FLAG_B
+    0x04:FLAG_C
+    0x08:FLAG_D
+
+STRUCT SIMPLE_EVENT
+    value:uint32_t
+STRUCT STATUS_EVENT
+    id:uint64_t
+    status:uint8_t:enum_test_status
+STRUCT FLAGS_EVENT
+    id:uint64_t
+    flags:uint32_t:flag_test_flags
+STRUCT COMPLEX_EVENT
+    id:uint64_t
+    value:uint32_t
+    status:uint8_t:enum_test_status
+    flags:uint32_t:flag_test_flags
+    counter:int32_t
+STRUCT VARLEN_EVENT
+    id:uint64_t
+    count:uint8_t
+    values:uint64_t[count:8]
+
+EVENT SIMPLE_EVENT  0  INFO  BASIC  SIMPLE_EVENT
+    "Simple event: value=%u"
+EVENT STATUS_EVENT  1  INFO  BASIC  STATUS_EVENT
+    "[%lu] Status event: status=%s"
+EVENT FLAGS_EVENT  2  VERBOSE  ADVANCED  FLAGS_EVENT
+    "[%lu] Flags event: flags=%s"
+EVENT COMPLEX_EVENT  3  WARN  COMPLEX  COMPLEX_EVENT
+    "[%lu] Complex event: value=%u status=%s flags=%s counter=%d"
+EVENT VARLEN_EVENT  4  INFO  BASIC  VARLEN_EVENT
+    "[%1] Varlen event: count=%2"

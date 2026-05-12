@@ -491,6 +491,37 @@ bhnd_nvram_map.h:
 	    ${SYSDIR}/dev/bhnd/nvram/nvram_map -h
 .endif
 
+# Generate an eventlog provider header from a single schema file.  A kmod
+# opts in by setting EVENTLOG_SCHEMA=<provider>_eventlog_schema.src; the
+# schema is fed through include/eventlog/eventlog_gen.awk to produce
+# <provider>_eventlog.h under ${OBJTOP}/sys/include/eventlog/.  The
+# header is added to SRCS so depend / clean see it, and its parent
+# directory is added to -I so the kmod's sources can do
+# #include <eventlog/<provider>_eventlog.h>.
+.if !empty(EVENTLOG_SCHEMA)
+EVENTLOG_SCHEMA_PATH=	${SRCTOP}/include/eventlog/${EVENTLOG_SCHEMA}
+EVENTLOG_PROVIDER!=	${AWK} '/^PROVIDER/ {print tolower($$2); exit}' ${EVENTLOG_SCHEMA_PATH}
+EVENTLOG_HEADER_DIR=	${OBJTOP}/sys/include/eventlog
+EVENTLOG_HEADER_DIR:=	${EVENTLOG_HEADER_DIR:tA}
+EVENTLOG_HEADER=	${EVENTLOG_PROVIDER}_eventlog.h
+EVENTLOG_HEADER_PATH=	${EVENTLOG_HEADER_DIR}/${EVENTLOG_HEADER}
+SRCS+=	${EVENTLOG_HEADER_PATH}
+CLEANFILES+=	${EVENTLOG_HEADER_PATH}
+.if !make(clean) && !make(cleandir) && !make(clobber)
+_EVENTLOG_GENHDR!=	mkdir -p ${EVENTLOG_HEADER_DIR}; \
+	if [ ! -f ${EVENTLOG_HEADER_PATH} ] || \
+	   [ ${EVENTLOG_SCHEMA_PATH} -nt ${EVENTLOG_HEADER_PATH} ] || \
+	   [ ${SRCTOP}/include/eventlog/eventlog_gen.awk -nt ${EVENTLOG_HEADER_PATH} ]; then \
+		cd ${SRCTOP} && ${AWK} -v outdir=${EVENTLOG_HEADER_DIR} -f include/eventlog/eventlog_gen.awk ${EVENTLOG_SCHEMA_PATH} -h; \
+	fi; echo done
+.endif
+CFLAGS+=	-I${EVENTLOG_HEADER_DIR:H}
+${EVENTLOG_HEADER_PATH}: ${SRCTOP}/include/eventlog/eventlog_gen.awk ${EVENTLOG_SCHEMA_PATH}
+	@mkdir -p ${EVENTLOG_HEADER_DIR}
+	@cd ${SRCTOP} && ${AWK} -v outdir=${EVENTLOG_HEADER_DIR} -f include/eventlog/eventlog_gen.awk ${EVENTLOG_SCHEMA_PATH} -h
+beforedepend: ${EVENTLOG_HEADER_PATH}
+.endif
+
 .if !empty(SRCS:Mbhnd_nvram_map_data.h)
 CLEANFILES+=	bhnd_nvram_map_data.h
 bhnd_nvram_map_data.h: ${SYSDIR}/dev/bhnd/tools/nvram_map_gen.awk \

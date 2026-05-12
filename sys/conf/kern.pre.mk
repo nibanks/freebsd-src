@@ -74,6 +74,44 @@ NOSTDINC= -nostdinc
 
 INCLUDES= ${NOSTDINC} ${INCLMAGIC} -I. -I$S -I$S/contrib/ck/include
 
+# Generate eventlog provider headers from schema files in
+# include/eventlog/.  Each *_eventlog_schema.src is fed through
+# include/eventlog/eventlog_gen.awk to produce <provider>_eventlog.h
+# under ${.OBJDIR}/include/eventlog/, and that directory's parent is
+# added to INCLUDES so kernel sources can do
+# #include <eventlog/<provider>_eventlog.h>.
+_EVENTLOG_HEADER_DIR=	${.OBJDIR}/include/eventlog
+_EVENTLOG_SCHEMA_DIR=	${SRCTOP}/include/eventlog
+_EVENTLOG_SCHEMAS!=	find ${_EVENTLOG_SCHEMA_DIR} -name '*_eventlog_schema.src' -type f 2>/dev/null | ${AWK} -F/ '{print $$NF}' || echo ""
+.if !empty(_EVENTLOG_SCHEMAS)
+.if !make(clean) && !make(cleandir) && !make(clobber)
+_EVENTLOG_GENHDRS!=	mkdir -p ${_EVENTLOG_HEADER_DIR}; \
+	awk_script="${_EVENTLOG_SCHEMA_DIR}/eventlog_gen.awk"; \
+	for schema in ${_EVENTLOG_SCHEMAS}; do \
+		schema_path="${_EVENTLOG_SCHEMA_DIR}/$$schema"; \
+		provider=$$(${AWK} '/^PROVIDER/ {print tolower($$2); exit}' "$$schema_path" 2>/dev/null); \
+		[ -n "$$provider" ] || continue; \
+		header="${_EVENTLOG_HEADER_DIR}/$${provider}_eventlog.h"; \
+		if [ ! -f "$$header" ] || \
+		   [ "$$schema_path" -nt "$$header" ] || \
+		   [ "$$awk_script" -nt "$$header" ]; then \
+			cd ${SRCTOP} && ${AWK} -v outdir="${_EVENTLOG_HEADER_DIR}" -f include/eventlog/eventlog_gen.awk include/eventlog/$$schema -h; \
+		fi; \
+	done; echo done
+.endif
+.for schema in ${_EVENTLOG_SCHEMAS}
+_EVENTLOG_PROVIDER_${schema}!=	${AWK} '/^PROVIDER/ {print tolower($$2); exit}' ${_EVENTLOG_SCHEMA_DIR}/${schema} 2>/dev/null || echo ""
+.if !empty(_EVENTLOG_PROVIDER_${schema})
+_EVENTLOG_HEADER_${schema}=	${_EVENTLOG_HEADER_DIR}/${_EVENTLOG_PROVIDER_${schema}}_eventlog.h
+${_EVENTLOG_HEADER_${schema}}: ${_EVENTLOG_SCHEMA_DIR}/eventlog_gen.awk ${_EVENTLOG_SCHEMA_DIR}/${schema}
+	@mkdir -p ${_EVENTLOG_HEADER_DIR}
+	@cd ${SRCTOP} && ${AWK} -v outdir="${_EVENTLOG_HEADER_DIR}" -f include/eventlog/eventlog_gen.awk include/eventlog/${schema} -h
+BEFORE_DEPEND+=	${_EVENTLOG_HEADER_${schema}}
+.endif
+.endfor
+INCLUDES+=	-I${_EVENTLOG_HEADER_DIR:H}
+.endif
+
 CFLAGS=	${COPTFLAGS} ${DEBUG}
 CFLAGS+= ${INCLUDES} -D_KERNEL -DHAVE_KERNEL_OPTION_HEADERS -include opt_global.h
 CFLAGS_PARAM_INLINE_UNIT_GROWTH?=100
