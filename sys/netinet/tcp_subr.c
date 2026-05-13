@@ -590,7 +590,7 @@ tcp_ensure_eventlog_session_on_switch(struct tcpcb *tp,
 }
 
 /*
- * Emit a CONN_PARAMS_V2 event derived entirely from tp.  Callers must invoke
+ * Emit a CONN_PARAMS event derived entirely from tp.  Callers must invoke
  * this only after the handshake has settled the negotiated parameters
  * (window scales, MSS, ECN/SACK/etc).  Reads the negotiated receive window
  * scale from tp->request_r_scale (not tp->rcv_scale): the passive-open path
@@ -607,7 +607,7 @@ tcp_eventlog_conn_params(struct tcpcb *tp)
 
 	KASSERT(tp != NULL, ("tcp_eventlog_conn_params: tp == NULL"));
 
-	if (!TCP_EVENTLOG_CONN_PARAMS_V2_ENABLED(tp->t_eventlog_session))
+	if (!TCP_EVENTLOG_CONN_PARAMS_ENABLED(tp->t_eventlog_session))
 		return;
 
 	if (tp->t_flags & TF_SACK_PERMIT)
@@ -636,7 +636,7 @@ tcp_eventlog_conn_params(struct tcpcb *tp)
 	if (tp->t_fb != NULL)
 		stack_name = tp->t_fb->tfb_tcp_block_name;
 
-	TCP_EVENTLOG_CONN_PARAMS_V2_LOG_ALWAYS(tp->t_eventlog_session,
+	TCP_EVENTLOG_CONN_PARAMS_LOG_ALWAYS(tp->t_eventlog_session,
 	    tp->iss, tp->irs, tp->t_maxseg, tp->snd_scale, tp->request_r_scale,
 	    flags, cc_name, stack_name);
 }

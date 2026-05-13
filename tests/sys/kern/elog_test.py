@@ -606,7 +606,7 @@ class TestElogCapture(BaseTest):
         Open a tcp connection BEFORE subscribing, then run elog with -D.
         The CREATE IOCTL invokes tcp_eventlog_dump_state inline on this
         thread; the callback walks every TCP PCB and re-emits
-        SESSION_CREATE / CONN_SET_IP_V4 / CONN_PARAMS_V2 for each
+        SESSION_CREATE / CONN_SET_IP_V4 / CONN_PARAMS for each
         enabled session. This exercises a meaningfully different code
         path from test_capture_tcp_loopback (where the subscriber
         attaches first and events flow live).
@@ -636,8 +636,8 @@ class TestElogCapture(BaseTest):
             ("IPv4 connection",  "CONN_SET_IP_V4 in dump"),
             ("127.0.0.1",        "loopback addr in dump"),
             (str(port),          f"port {port} in dump"),
-            ("Connection parameters: ISS", "CONN_PARAMS_V2 in dump"),
-            (", MSS ",           "MSS field of CONN_PARAMS_V2 in dump"),
+            ("Connection parameters: ISS", "CONN_PARAMS in dump"),
+            (", MSS ",           "MSS field of CONN_PARAMS in dump"),
         ):
             _assert_in_decode(decoded, needle, label)
 
