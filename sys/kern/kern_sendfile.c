@@ -1130,12 +1130,12 @@ prepend_header:
 			    td);
 			sendfile_iodone(sfio, NULL, 0, error);
 		}
-#ifdef TCP_REQUEST_TRK
 		if (so->so_proto->pr_protocol == IPPROTO_TCP) {
-			/* log the sendfile call to the TCP log, if enabled */
+			tcp_eventlog_sendfile(so, offset, nbytes, flags);
+#ifdef TCP_REQUEST_TRK
 			tcp_log_sendfile(so, offset, nbytes, flags);
-		}
 #endif
+		}
 		m = NULL;
 		if (error)
 			goto done;

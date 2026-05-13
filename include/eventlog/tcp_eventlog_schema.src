@@ -1,0 +1,670 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 Netflix, Inc.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * This file defines the schema for TCP event logging.
+ * It is processed by eventlog_gen.awk to generate the event log header
+ *
+ * Format:
+ * PROVIDER <name>
+ *   Defines the provider name used as a prefix for all generated definitions
+ *
+ * ENUM <name> <value1>:<name1> <value2>:<name2> ...
+ *   Defines an enumeration for converting numeric values to strings.
+ *   Used for single-value fields (e.g., ENUM timer_reason 0:PACING 1:DELACK)
+ *
+ * FLAG <name> <value1>:<name1> <value2>:<name2> ...
+ *   Defines a flag set for converting bitmask values to strings.
+ *   Used for fields that can have multiple flags combined (e.g., FLAG tcp_flags 1:SYN 2:ACK)
+ *
+ * STRUCT <name> <field1>:<type1>[:enum_or_flag] <field2>:<type2>[:enum_or_flag] ...
+ *   Defines a structure for event data. Each field is specified as name:type[:enum_or_flag]
+ *   (e.g., STRUCT IN seq:uint32_t ack:uint32_t)
+ *   For enum/flag fields, use enum_<enum_name> or flag_<flag_name> (e.g., reason:uint8_t:enum_timer_reason)
+ *
+ * KEYWORD <name> <value>
+ *   Defines a keyword flag with a numeric value (e.g., KEYWORD DATA 1)
+ *
+ * EVENT <name> <id> <level> <keywords> <struct> <print_format>
+ *   Defines an event. Extra spaces are allowed for alignment.
+ *   Format strings should use %s for enum/flag fields (e.g., "reason=%s")
+ *
+ * Where:
+ *   name: Event name (e.g., IN)
+ *   id: Numeric event ID
+ *   level: Log level (ERROR, WARN, INFO, VERBOSE)
+ *   keywords: Comma-separated list of keyword flags (e.g., DATA)
+ *   struct: Name of the STRUCT definition to use for this event, or NONE for
+ *           events with no payload. NONE events generate macros that take only
+ *           the session parameter and emit zero-length payloads.
+ *   print_format: printf-style format string for text output (use %s for enum/flag fields)
+ *
+ * Schema evolution
+ *
+ * Event payloads are decoded by struct layout: the consumer maps an event ID
+ * to a STRUCT and reads sizeof(STRUCT) bytes. Adding, removing, reordering, or
+ * retyping fields in an existing STRUCT silently breaks decoding of older
+ * captures that emit the same event ID with the previous payload size. The
+ * supported pattern for evolving an event is:
+ *
+ *   1. Define a new STRUCT and a new EVENT with a `_V2` (or `_V3`, ...)
+ *      suffix and a new event ID; put the new fields there.
+ *   2. Mark the previous STRUCT/EVENT as deprecated in a comment and stop
+ *      emitting it from the kernel. The old definitions stay in the schema
+ *      so older captures continue to decode.
+ *   3. Consumers learn the new event ID at their own pace; old consumers
+ *      that don't know the new ID render it as [UNKNOWN_EVENT_ID:N].
+ *
+ * Do not append fields to an existing STRUCT or change an existing field's
+ * type/order — introduce a `_V2` event instead.
+ */
+
+PROVIDER tcp
+
+/* Packet direction */
+KEYWORD RX          1
+KEYWORD TX          2
+/* Loss detection and recovery (RTO, retransmit, DSACK, enter/exit recovery) */
+KEYWORD LOSS        3
+/* Congestion control algorithm state (cwnd, PRR, hystart, goodput, RTT) */
+KEYWORD CC          4
+/* Pacing decisions and hardware offload */
+KEYWORD PACING      5
+/* Protocol timer machinery */
+KEYWORD TIMER       6
+/* Application-facing events (sends, socket options, socket buffer wakeups) */
+KEYWORD APP         7
+/* Connection lifecycle and identity (address binding, log ID) */
+KEYWORD CONN        8
+
+/*
+ * Enumerations
+ */
+
+ENUM timer_reason
+    0:PACING
+    1:DELAYACK
+    2:RACK
+    3:TLP
+    4:RXT
+    5:PERSIST
+    6:KEEPALIVE
+
+ENUM tcp_state
+    0:CLOSED
+    1:LISTEN
+    2:SYN_SENT
+    3:SYN_RECEIVED
+    4:ESTABLISHED
+    5:CLOSE_WAIT
+    6:FIN_WAIT_1
+    7:CLOSING
+    8:LAST_ACK
+    9:FIN_WAIT_2
+    10:TIME_WAIT
+
+ENUM socket_option
+    1:TCP_NODELAY
+    2:TCP_MAXSEG
+    4:TCP_NOPUSH
+    8:TCP_NOOPT
+    16:TCP_MD5SIG
+    32:TCP_INFO
+    33:TCP_STATS
+    34:TCP_LOG
+    35:TCP_LOGBUF
+    36:TCP_LOGID
+    37:TCP_LOGDUMP
+    38:TCP_LOGDUMPID
+    39:TCP_TXTLS_ENABLE
+    40:TCP_TXTLS_MODE
+    41:TCP_RXTLS_ENABLE
+    42:TCP_RXTLS_MODE
+    43:TCP_IWND_NB
+    44:TCP_IWND_NSEG
+    45:TCP_USE_DDP
+    46:TCP_LOGID_CNT
+    47:TCP_LOG_TAG
+    48:TCP_USER_LOG
+    64:TCP_CONGESTION
+    65:TCP_CCALGOOPT
+    68:TCP_MAXUNACKTIME
+    70:TCP_IDLE_REDUCE
+    71:TCP_REMOTE_UDP_ENCAPS_PORT
+    72:TCP_DELACK
+    73:TCP_FIN_IS_RST
+    74:TCP_LOG_LIMIT
+    75:TCP_SHARED_CWND_ALLOWED
+    76:TCP_PROC_ACCOUNTING
+    77:TCP_USE_CMP_ACKS
+    78:TCP_PERF_INFO
+    79:TCP_RST_REASON_CODE
+    80:TCP_EVENTLOG
+    128:TCP_KEEPINIT
+    256:TCP_KEEPIDLE
+    512:TCP_KEEPINTVL
+    1024:TCP_KEEPCNT
+    1025:TCP_FASTOPEN
+    1026:TCP_REUSPORT_LB_NUMA
+    1050:TCP_RACK_MBUF_QUEUE
+    1052:TCP_RACK_TLP_REDUCE
+    1054:TCP_RACK_PACE_MAX_SEG
+    1055:TCP_RACK_PACE_ALWAYS
+    1057:TCP_RACK_PRR_SENDALOT
+    1058:TCP_RACK_MIN_TO
+    1060:TCP_RACK_EARLY_SEG
+    1061:TCP_RACK_REORD_THRESH
+    1062:TCP_RACK_REORD_FADE
+    1063:TCP_RACK_TLP_THRESH
+    1064:TCP_RACK_PKT_DELAY
+    1067:TCP_BBR_IWINTSO
+    1069:TCP_BBR_STARTUP_PG
+    1070:TCP_BBR_DRAIN_PG
+    1072:TCP_BBR_PROBE_RTT_INT
+    1074:TCP_BBR_STARTUP_LOSS_EXIT
+    1076:TCP_BBR_TSLIMITS
+    1077:TCP_BBR_PACE_OH
+    1079:TCP_BBR_USEDEL_RATE
+    1080:TCP_BBR_MIN_RTO
+    1081:TCP_BBR_MAX_RTO
+    1083:TCP_BBR_ALGORITHM
+    1086:TCP_BBR_PACE_PER_SEC
+    1087:TCP_BBR_PACE_DEL_TAR
+    1088:TCP_BBR_PACE_SEG_MAX
+    1089:TCP_BBR_PACE_SEG_MIN
+    1090:TCP_BBR_PACE_CROSS
+    1095:TCP_RACK_TLP_USE
+    1096:TCP_BBR_TMR_PACE_OH
+    1097:TCP_RACK_DO_DETECTION
+    1098:TCP_BBR_RACK_RTT_USE
+    1099:TCP_BBR_RETRAN_WTSO
+    1100:TCP_DATA_AFTER_CLOSE
+    1101:TCP_BBR_PROBE_RTT_GAIN
+    1102:TCP_BBR_PROBE_RTT_LEN
+    1103:TCP_BBR_SEND_IWND_IN_TSO
+    1104:TCP_BBR_USE_RACK_RR
+    1105:TCP_BBR_HDWR_PACE
+    1106:TCP_BBR_UTTER_MAX_TSO
+    1107:TCP_BBR_EXTRA_STATE
+    1108:TCP_BBR_FLOOR_MIN_TSO
+    1109:TCP_BBR_MIN_TOPACEOUT
+    1110:TCP_BBR_TSTMP_RAISES
+    1111:TCP_BBR_POLICER_DETECT
+    1112:TCP_BBR_RACK_INIT_RATE
+    1113:TCP_RACK_RR_CONF
+    1114:TCP_RACK_GP_INCREASE_CA
+    1115:TCP_RACK_GP_INCREASE_SS
+    1116:TCP_RACK_GP_INCREASE_REC
+    1117:TCP_RACK_FORCE_MSEG
+    1118:TCP_RACK_PACE_RATE_CA
+    1119:TCP_RACK_PACE_RATE_SS
+    1120:TCP_RACK_PACE_RATE_REC
+    1122:TCP_NO_PRR
+    1123:TCP_RACK_NONRXT_CFG_RATE
+    1124:TCP_SHARED_CWND_ENABLE
+    1125:TCP_TIMELY_DYN_ADJ
+    1126:TCP_RACK_NO_PUSH_AT_MAX
+    1127:TCP_RACK_PACE_TO_FILL
+    1128:TCP_SHARED_CWND_TIME_LIMIT
+    1129:TCP_RACK_PROFILE
+    1130:TCP_HDWR_RATE_CAP
+    1131:TCP_PACING_RATE_CAP
+    1132:TCP_HDWR_UP_ONLY
+    1133:TCP_RACK_ABC_VAL
+    1134:TCP_REC_ABC_VAL
+    1135:TCP_RACK_MEASURE_CNT
+    1136:TCP_DEFER_OPTIONS
+    1138:TCP_RACK_PACING_BETA
+    1139:TCP_RACK_PACING_BETA_ECN
+    1140:TCP_RACK_TIMER_SLOP
+    1141:TCP_RACK_DSACK_OPT
+    1142:TCP_RACK_ENABLE_HYSTART
+    1143:TCP_RACK_SET_RXT_OPTIONS
+    1144:TCP_RACK_HI_BETA
+    1145:TCP_RACK_SPLIT_LIMIT
+    1146:TCP_RACK_PACING_DIVISOR
+    1147:TCP_RACK_PACE_MIN_SEG
+    1148:TCP_RACK_DGP_IN_REC
+    1150:TCP_HYBRID_PACING
+    1151:TCP_PACING_DND
+    1152:TCP_SS_EEXIT
+    1153:TCP_DGP_UPPER_BOUNDS
+    1154:TCP_NO_TIMELY
+    1155:TCP_HONOR_HPTS_MIN
+    1156:TCP_REC_IS_DYN
+    1157:TCP_SIDECHAN_DIS
+    1158:TCP_FILLCW_RATE_CAP
+    1160:TCP_STACK_SPEC_INFO
+    1161:RACK_CSPR_IS_FCC
+    1162:TCP_GP_USE_LTBW
+    1163:TCP_NGEN_GPUT_MAXSEG
+    8192:TCP_FUNCTION_BLK
+    8193:TCP_FUNCTION_ALIAS
+    2147483643:TCP_RXT_CLAMP
+    2147483645:TCP_LOG_DETAILED
+    2147483647:TCP_LOG_RATIO
+
+ENUM sb_wake_type
+    1:RCV
+    2:SND
+
+ENUM output_way
+    0:NORMAL
+    1:PERSIST
+    2:HPTS
+    3:OUTPUT
+    4:DROP_SYNFIN
+    5:DROP_MISSING_TS
+    6:COMPLETED
+
+ENUM collapse_dir
+    0:UNCOLLAPSED
+    1:COLLAPSED
+    2:RSM_MARKED
+    3:SPLIT
+
+/*
+ * Flags
+ */
+
+FLAG tcp_flags
+    0x01:FIN
+    0x02:SYN
+    0x04:RST
+    0x08:PUSH
+    0x10:ACK
+    0x20:URG
+    0x40:ECE
+    0x80:CWR
+    0x100:AE
+
+FLAG sb_flags
+    0x01:SB_TLS_RX
+    0x02:SB_TLS_RX_RUNNING
+    0x04:SB_WAIT
+    0x08:SB_SEL
+    0x10:SB_ASYNC
+    0x20:SB_UPCALL
+    0x40:SB_AUTOLOWAT
+    0x80:SB_AIO
+    0x100:SB_KNOTE
+    0x200:SB_NOCOALESCE
+    0x400:SB_IN_TOE
+    0x800:SB_AUTOSIZE
+    0x2000:SB_AIO_RUNNING
+    0x4000:SB_SPLICED
+    0x8000:SB_TLS_RX_RESYNC
+
+FLAG sb_state
+    0x10:SBS_CANTSENDMORE
+    0x20:SBS_CANTRCVMORE
+    0x40:SBS_RCVATMARK
+
+FLAG sendfile_flags
+    0x01:SF_NODISKIO
+    0x02:SF_MNOWAIT
+    0x08:SF_USER_READAHEAD
+    0x10:SF_NOCACHE
+
+FLAG prus_flags
+    0x1:PRUS_OOB
+    0x2:PRUS_EOF
+    0x4:PRUS_MORETOCOME
+    0x8:PRUS_NOTREADY
+
+FLAG timer_type
+    0x01:DELACK
+    0x02:RACK
+    0x04:TLP
+    0x08:RXT
+    0x10:PERSIST
+    0x20:KEEP
+
+FLAG conn_params_flags
+    0x01:CP_SACK_PERMIT
+    0x02:CP_TIMESTAMPS
+    0x04:CP_ECN
+    0x08:CP_ACE
+    0x10:CP_FASTOPEN
+    0x20:CP_SIGNATURE
+    0x40:CP_WINDOW_SCALE
+
+/*
+ * Structures - grouped by event category
+ */
+
+/* Connection / Session */
+STRUCT SESSION_CREATE
+    tp:void*
+STRUCT CONN_SET_IP_V4
+    src_addr:in_addr_t
+    src_port:uint16_t:ntohs
+    dst_addr:in_addr_t
+    dst_port:uint16_t:ntohs
+STRUCT CONN_SET_IP_V6
+    src_addr:in6_addr_t
+    src_port:uint16_t:ntohs
+    dst_addr:in6_addr_t
+    dst_port:uint16_t:ntohs
+STRUCT LOG_ID
+    log_id:char[64]
+/* DEPRECATED: replaced by CONN_PARAMS_V2. */
+STRUCT CONN_PARAMS
+    iss:uint32_t
+    irs:uint32_t
+STRUCT CONN_PARAMS_V2
+    iss:uint32_t
+    irs:uint32_t
+    mss:uint32_t
+    snd_wscale:uint8_t
+    rcv_wscale:uint8_t
+    flags:uint8_t:flag_conn_params_flags
+    cc_algo:char[16]
+    tcp_stack:char[32]
+STRUCT TCP_STACK_CHANGE
+    tcp_stack:char[32]
+STRUCT CC_ALGO_CHANGE
+    cc_algo:char[16]
+STRUCT MSS
+    mss:uint32_t
+STRUCT CONN_OWNER
+    pid:int32_t
+
+/* Data plane */
+STRUCT IN
+    seq:uint32_t
+    ack:uint32_t
+    win:uint32_t
+    len:uint32_t
+    flags:uint16_t:flag_tcp_flags
+    state:uint8_t:enum_tcp_state
+    th_off:uint8_t
+    th_sum:uint16_t:hex
+    th_urp:uint16_t
+    rcv_time_us:uint64_t
+STRUCT OUT
+    seq:uint32_t
+    ack:uint32_t
+    win:uint32_t
+    len:uint32_t
+    flags:uint16_t:flag_tcp_flags
+    cwnd:uint32_t
+    th_off:uint8_t
+    th_sum:uint16_t:hex
+    th_urp:uint16_t
+STRUCT USER_SEND
+    error:int32_t
+    flags:uint32_t:flag_prus_flags
+    state:uint8_t:enum_tcp_state
+    sndbuf_used:uint32_t
+    sndbuf_avail:uint32_t
+    send_len:uint32_t
+STRUCT SENDFILE
+    offset:uint64_t
+    length:uint64_t
+    flags:uint32_t:flag_sendfile_flags
+STRUCT ACK
+    acked:uint32_t
+    snd_una:uint32_t
+    inflight:uint32_t
+    sacked:uint32_t
+    nsegs:uint32_t
+    rcv_time_us:uint64_t
+STRUCT SACK
+    acked:uint32_t
+    snd_una:uint32_t
+    inflight:uint32_t
+    sacked:uint32_t
+    nsegs:uint32_t
+    rcv_time_us:uint64_t
+    num_blocks:uint8_t
+    blk1_start:uint32_t
+    blk1_end:uint32_t
+    blk2_start:uint32_t
+    blk2_end:uint32_t
+    blk3_start:uint32_t
+    blk3_end:uint32_t
+    blk4_start:uint32_t
+    blk4_end:uint32_t
+
+/* Congestion control / Window */
+STRUCT CWND
+    cwnd:uint32_t
+    ssthresh:uint32_t
+STRUCT CC_PARAMS
+    beta:uint32_t
+    beta_ecn:uint32_t
+STRUCT ENTER_RECOVERY
+    cwnd:uint32_t
+    ssthresh:uint32_t
+STRUCT EXIT_RECOVERY
+    cwnd:uint32_t
+    ssthresh:uint32_t
+STRUCT PRR_STATE
+    prr_out:uint32_t
+    recovery_fs:uint32_t
+    prr_sndcnt:uint32_t
+    prr_delivered:uint32_t
+    sacked:uint32_t
+    holes_rxt:uint32_t
+    inflight:uint32_t
+STRUCT WINDOW_COLLAPSE
+    count:uint32_t
+    direction:uint8_t:enum_collapse_dir
+    inflight:uint32_t
+    has_collapsed:uint8_t
+STRUCT HYSTART
+    round:uint32_t
+    high_seq:uint32_t
+    snd_max:uint32_t
+    mod:uint8_t
+STRUCT GOODPUT
+    gp_bw:uint64_t
+    raw_bw:uint64_t
+    utim:uint64_t
+
+/* RTT */
+STRUCT RTT
+    rtt:uint32_t
+    srtt:uint32_t
+    path_rtt:uint32_t
+    lowest_rtt:uint32_t
+    gp_filter_min:uint32_t
+    gp_srtt:uint32_t
+
+STRUCT RTT_SAMPLE
+    rtt:uint32_t
+
+/* Loss / Retransmission */
+STRUCT RTO
+    timeout_num:int32_t
+    min_rtt:uint32_t
+    rtt:uint32_t
+    segment_len:uint32_t
+    inflight:uint32_t
+    pkts_out:uint32_t
+STRUCT RETRANSMIT_REASON
+    threshold:uint32_t
+    dupack_count:uint32_t
+    rsm_start:uint32_t
+    rsm_end:uint32_t
+    inflight:uint32_t
+STRUCT DSACK
+    dsack_round_seen:uint8_t
+    dsack_round_end:uint32_t
+    num_dsack:uint32_t
+    dsack_persist:uint32_t
+    mod:uint8_t
+    round:uint32_t
+
+/* Scheduling / Timers */
+STRUCT TIMER_START
+    timeout:uint32_t
+    reason:uint8_t:enum_timer_reason
+STRUCT TIMER_FIRED
+    timer_type:uint32_t:flag_timer_type
+    result:int32_t
+STRUCT SB_WAKE
+    sb_flags:uint32_t:flag_sb_flags
+    len:uint32_t
+    sb_state:uint32_t:flag_sb_state
+    type:uint8_t:enum_sb_wake_type
+
+/* Pacing */
+STRUCT PACING_CALC
+    slot:uint32_t
+    bw_est:uint64_t
+    method:uint8_t
+    quality:uint8_t
+    in_slow_start:uint8_t
+    inflight:uint32_t
+STRUCT PACE_STATE
+    rc_pace_min_segs:uint32_t
+    rc_pace_max_segs:uint32_t
+STRUCT HW_PACE_RATE
+    requested_rate:uint64_t
+    hw_rate:uint64_t
+    error:int32_t
+    mod:uint8_t
+
+/* Configuration */
+STRUCT SOCKET_OPT_UINT32
+    option_num:uint32_t:enum_socket_option
+    option_val:uint32_t
+STRUCT SOCKET_OPT_ERR
+    option_num:uint32_t:enum_socket_option
+    err:int32_t
+
+/* Output */
+STRUCT OUTPUT_DECISION
+    did_output:int32_t
+    nxt_pkt:int32_t
+    way_out:int32_t:enum_output_way
+    nsegs:int32_t
+    inflight:uint32_t
+    in_persist:uint8_t
+
+/*
+ * Events - grouped by category, renumbered for logical ordering
+ */
+
+/* Session */
+EVENT SESSION_CREATE  4294967294  INFO  SESSION  SESSION_CREATE
+    "Session created (tp=%1)"
+
+/* Connection (0-99) */
+EVENT CONN_SET_IP_V4  0  INFO  CONN  CONN_SET_IP_V4
+    "IPv4 connection %1:%2 -> %3:%4"
+EVENT CONN_SET_IP_V6  1  INFO  CONN  CONN_SET_IP_V6
+    "IPv6 connection %1:%2 -> %3:%4"
+EVENT LOG_ID  2  INFO  CONN  LOG_ID
+    "Log ID assigned: %1"
+/* DEPRECATED: replaced by CONN_PARAMS_V2. */
+EVENT CONN_PARAMS  3  INFO  CONN  CONN_PARAMS
+    "Connection parameters: ISS %1, IRS %2"
+EVENT MSS  4  INFO  CONN  MSS
+    "MSS set to %1 bytes"
+EVENT CONN_OWNER  5  INFO  CONN  CONN_OWNER
+    "Connection owned by PID %1"
+EVENT CONN_PARAMS_V2  6  INFO  CONN  CONN_PARAMS_V2
+    "Connection parameters: ISS %1, IRS %2, MSS %3, snd_wscale %4, rcv_wscale %5, flags %6, cc %7, stack %8"
+EVENT TCP_STACK_CHANGE  7  INFO  CONN  TCP_STACK_CHANGE
+    "TCP stack changed to %1"
+EVENT CC_ALGO_CHANGE  8  INFO  CONN,CC  CC_ALGO_CHANGE
+    "CC algorithm changed to %1"
+
+/* Data plane (100-199) */
+EVENT IN  100  VERBOSE  RX  IN
+    "Received %4 bytes (seq %1, ack %2, win %3, flags %5) in state %6 rcv_time %10 us"
+EVENT OUT  101  VERBOSE  TX  OUT
+    "Sent %4 bytes (seq %1, ack %2, win %3, flags %5, cwnd %6)"
+EVENT ACK  102  VERBOSE  RX,CC  ACK
+    "Acknowledged %1 bytes to %2 (%3 in flight, %4 sacked, %5 segments, rcv_time %6 us)"
+EVENT SACK  103  VERBOSE  RX,CC  SACK
+    "SACKed %1 bytes to %2 (%3 in flight, %4 sacked, %5 segs, rcv_time %6 us, %7 blocks: [%8-%9] [%10-%11] [%12-%13] [%14-%15])"
+EVENT USER_SEND  104  INFO  TX,APP  USER_SEND
+    "Application send of %6 bytes in state %3 (%4 used, %5 available in sndbuf, flags %2, error %1)"
+EVENT SENDFILE  105  INFO  TX,APP  SENDFILE
+    "Sendfile %2 bytes at offset %1 (flags %3)"
+
+/* Congestion control / Window (200-299) */
+EVENT CWND  200  VERBOSE  CC  CWND
+    "Congestion window now %1 (ssthresh %2)"
+EVENT CC_PARAMS  201  INFO  CC  CC_PARAMS
+    "CC parameters changed: beta %1, beta_ecn %2"
+EVENT ENTER_RECOVERY  202  WARN  CC,LOSS  ENTER_RECOVERY
+    "Entered loss recovery (cwnd %1, ssthresh %2)"
+EVENT EXIT_RECOVERY  203  WARN  CC,LOSS  EXIT_RECOVERY
+    "Exited loss recovery (cwnd %1, ssthresh %2)"
+EVENT PRR_STATE  204  TRACE  CC,LOSS  PRR_STATE
+    "PRR recovery: %1 sent of %3 allowed, %4 delivered of %2 flight (%5 sacked, %6 retransmitted, %7 in flight)"
+EVENT WINDOW_COLLAPSE  205  WARN  CC  WINDOW_COLLAPSE
+    "Peer window %2: %1 segments affected (%3 bytes in flight)"
+EVENT HYSTART  206  TRACE  CC  HYSTART
+    "Slow start round %1 completed (high_seq %2, snd_max %3, event %4)"
+EVENT GOODPUT  207  INFO  CC  GOODPUT
+    "Goodput sample %2 bps (EWMA %1 bps) over %3 us"
+
+/* RTT (300-399) */
+EVENT RTT  300  INFO  CC  RTT
+    "RTT sample %1 us applied to srtt %2 us (path %3 us, all-time low %4 us, GP min %5 us, gp_srtt %6 us)"
+EVENT RTT_SAMPLE  301  TRACE  CC  RTT_SAMPLE
+    "RTT sample %1 us"
+
+/* Loss / Retransmission (400-499) */
+EVENT RTO  400  WARN  LOSS,TX  RTO
+    "Timeout #%1 (rtt %3 us, min_rtt %2 us, %4 byte segment, %5 in flight, %6 pkts out)"
+EVENT RETRANSMIT_REASON  401  WARN  LOSS,TX  RETRANSMIT_REASON
+    "Retransmitting bytes %3-%4 (threshold %1, %2 dupacks, %5 in flight)"
+EVENT DSACK  402  INFO  LOSS,RX  DSACK
+    "DSACK detected: %3 total in round %6 (persist %4)"
+
+/* Timers (500-599) */
+EVENT TIMER_START  500  VERBOSE  TIMER  TIMER_START
+    "Started %2 timer for %1 us"
+EVENT TIMER_CANCEL  501  VERBOSE  TIMER  NONE
+    "Timer canceled"
+EVENT TIMER_FIRED  502  VERBOSE  TIMER  TIMER_FIRED
+    "Timer expired (type %1, result %2)"
+EVENT SB_WAKE  503  VERBOSE  APP  SB_WAKE
+    "Socket buffer %4 wakeup (%2 bytes, flags %1, state %3)"
+
+/* Pacing (600-699) */
+EVENT PACING_CALC  600  VERBOSE  PACING  PACING_CALC
+    "Pacing delay %1 us at %2 bps (method %3, quality %4, %6 in flight)"
+EVENT PACE_STATE  601  TRACE  PACING  PACE_STATE
+    "Pacing burst size: min %1, max %2 bytes per segment"
+EVENT HW_PACE_RATE  602  INFO  PACING  HW_PACE_RATE
+    "Hardware pacer set to %2 bps (requested %1 bps, error %3)"
+
+/* Configuration (700-799) */
+EVENT SOCKET_OPT_UINT32  700  INFO  APP,CONN  SOCKET_OPT_UINT32
+    "Socket option %1 set to %2"
+EVENT SOCKET_OPT_ERR  701  WARN  APP,CONN  SOCKET_OPT_ERR
+    "Socket option %1 failed with error %2"
+
+/* Output (800-899) */
+EVENT OUTPUT_DECISION  800  TRACE  TX  OUTPUT_DECISION
+    "Segment processing done: sent %4 segments via %3 (%5 in flight, persist %6)"
