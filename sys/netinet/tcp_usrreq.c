@@ -92,6 +92,7 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/tcpip.h>
 #include <netinet/cc/cc.h>
 #include <netinet/tcp_fastopen.h>
@@ -177,6 +178,12 @@ tcp_usr_attach(struct socket *so, int proto, struct thread *td)
 		goto out;
 	}
 	tp->t_state = TCPS_CLOSED;
+	/*
+	 * Record the PID of the process that opened this socket so the
+	 * connection's eventlog can identify the owning application.
+	 */
+	if (td != NULL && td->td_proc != NULL)
+		tp->t_owning_pid = td->td_proc->p_pid;
 	tcp_bblog_pru(tp, PRU_ATTACH, error);
 	INP_WUNLOCK(inp);
 	TCPSTATES_INC(TCPS_CLOSED);
@@ -897,6 +904,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	u_int8_t incflagsav;
 	u_char vflagsav;
 	bool restoreflags;
+	u_int appended = 0;
 
 	INP_WLOCK(inp);
 	if (__predict_false(tp->t_flags & TF_DISCONNECTED)) {
@@ -1023,7 +1031,9 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	if (!(flags & PRUS_OOB)) {
 		if (tp->t_acktime == 0)
 			tp->t_acktime = ticks;
+		appended = sbavail(&so->so_snd);
 		sbappendstream(&so->so_snd, m, flags);
+		appended = sbavail(&so->so_snd) - appended;
 		m = NULL;
 		if (nam && tp->t_state < TCPS_SYN_SENT) {
 			KASSERT(tp->t_state == TCPS_CLOSED,
@@ -1109,7 +1119,9 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 		 */
 		if (tp->t_acktime == 0)
 			tp->t_acktime = ticks;
+		appended = sbavail(&so->so_snd);
 		sbappendstream_locked(&so->so_snd, m, flags);
+		appended = sbavail(&so->so_snd) - appended;
 		SOCK_SENDBUF_UNLOCK(so);
 		m = NULL;
 		if (nam && tp->t_state < TCPS_SYN_SENT) {
@@ -1162,6 +1174,9 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	    &inp->inp_socket->so_snd,
 	    TCP_LOG_USERSEND, error,
 	    0, NULL, false);
+	TCP_EVENTLOG_USER_SEND_LOG(tp->t_eventlog_session,
+	    error, flags, tp->t_state,
+	    sbused(&so->so_snd), sbavail(&so->so_snd), appended);
 
 out:
 	/*
@@ -1428,6 +1443,14 @@ tcp_connect(struct tcpcb *tp, struct sockaddr_in *sin, struct thread *td)
 	if (error != 0)
 		return (error);
 
+	if (inp->inp_vflag & INP_IPV4) {
+		TCP_EVENTLOG_CONN_SET_IP_V4_LOG(tp->t_eventlog_session,
+		    inp->inp_laddr,
+		    inp->inp_lport,
+		    inp->inp_faddr,
+		    inp->inp_fport);
+	}
+
 	/* set the hash on the connection */
 	rss_proto_software_hash_v4(inp->inp_faddr, inp->inp_laddr,
 	    inp->inp_fport, inp->inp_lport, IPPROTO_TCP,
@@ -1474,6 +1497,14 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr_in6 *sin6, struct thread *td)
 	error = in6_pcbconnect(inp, sin6, td->td_ucred, true);
 	if (error != 0)
 		return (error);
+
+	if (inp->inp_vflag & INP_IPV6) {
+		TCP_EVENTLOG_CONN_SET_IP_V6_LOG(tp->t_eventlog_session,
+		    inp->inp_inc.inc6_laddr,
+		    inp->inp_lport,
+		    inp->inp_inc.inc6_faddr,
+		    inp->inp_fport);
+	}
 
 	/* set the hash on the connection */
 	rss_proto_software_hash_v6(&inp->in6p_faddr,
@@ -1753,6 +1784,7 @@ tcp_ctloutput_set(struct inpcb *inp, struct sockopt *sopt)
 		 */
 		tp->t_fb = blk;
 		tp->t_fb_ptr = ptr;
+		tcp_ensure_eventlog_session_on_switch(tp, blk);
 #ifdef TCP_OFFLOAD
 		if (tp->t_flags & TF_TOE) {
 			tcp_offload_ctloutput(tp, sopt->sopt_dir,
@@ -1946,6 +1978,8 @@ no_mem_needed:
 		memcpy(&tp->t_ccv, &cc_mem, sizeof(struct cc_var));
 		/* Now attach the new, which takes a reference */
 		cc_attach(tp, algo);
+		TCP_EVENTLOG_CC_ALGO_CHANGE_LOG(tp->t_eventlog_session,
+		    algo->name);
 		/* Ok now are we where we have gotten past any conn_init? */
 		if (TCPS_HAVEESTABLISHED(tp->t_state) && (CC_ALGO(tp)->conn_init != NULL)) {
 			/* Yep run the connection init for the new CC */
@@ -2148,6 +2182,8 @@ unlock_and_done:
 				} else {
 					tp->t_flags2 &= ~TF2_PROC_SACK_PROHIBIT;
 				}
+				TCP_EVENTLOG_MSS_LOG(tp->t_eventlog_session,
+				    tp->t_maxseg);
 			} else
 				error = EINVAL;
 			goto unlock_and_done;
@@ -2199,6 +2235,24 @@ unlock_and_done:
 				error = in_pcblbgroup_numa(inp, optval);
 			INP_WUNLOCK(inp);
 			break;
+
+		case TCP_EVENTLOG:
+			INP_WUNLOCK(inp);
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error)
+				return (error);
+			INP_WLOCK_RECHECK(inp);
+			if (optval)
+				tp->t_flags2 |= TF2_EVENTLOG_ENABLED;
+			else
+				tp->t_flags2 &= ~TF2_EVENTLOG_ENABLED;
+			eventlog_session_set_enabled(
+			    tp->t_eventlog_session, optval);
+			if (optval)
+				tcp_eventlog_dump_session(tp,
+				    tcp_log_id_str(tp));
+			goto unlock_and_done;
 
 #ifdef KERN_TLS
 		case TCP_TXTLS_ENABLE:
@@ -2547,6 +2601,16 @@ unhold:
 			error = EINVAL;
 			break;
 #endif
+		case TCP_EVENTLOG:
+			if (tp->t_eventlog_session != NULL)
+				optval = eventlog_session_is_enabled(
+				    tp->t_eventlog_session);
+			else
+				optval = (tp->t_flags2 &
+				    TF2_EVENTLOG_ENABLED) ? 1 : 0;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof(optval));
+			break;
 #ifdef KERN_TLS
 		case TCP_TXTLS_MODE:
 			error = ktls_get_tx_mode(so, &optval);

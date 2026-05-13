@@ -355,6 +355,13 @@ tcp_log_id_cmp(struct tcp_log_id_bucket *a, struct tcp_log_id_bucket *b)
 
 RB_GENERATE_STATIC(tcp_log_id_tree, tcp_log_id_bucket, tlb_rb, tcp_log_id_cmp)
 
+const char *
+tcp_log_id_str(struct tcpcb *tp)
+{
+
+	return (tp->t_lib != NULL) ? tp->t_lib->tlb_id : NULL;
+}
+
 static __inline void
 tcp_log_id_validate_tree_lock(int tree_locked)
 {
@@ -499,6 +506,8 @@ tcp_log_remove_id_node(struct inpcb *inp, struct tcpcb *tp,
 
 	tcp_log_id_validate_tree_lock(*tree_locked);
 	TCPID_BUCKET_LOCK_ASSERT(tlb);
+
+	tcp_eventlog_on_log_id_clear(tp);
 
 	/*
 	 * Remove the node, clear the log bucket and node from the TCPCB, and
@@ -987,6 +996,9 @@ refind:
 		SLIST_INSERT_HEAD(&tlb->tlb_head, tln, tln_list);
 		tp->t_lib = tlb;
 		tp->t_lin = tln;
+
+		tcp_eventlog_on_log_id_set(tp, tlb->tlb_id);
+
 		if (tp->t_lib->tlb_logstate > TCP_LOG_STATE_OFF) {
 			/* Clone in any logging */
 
