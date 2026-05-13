@@ -370,11 +370,7 @@ STRUCT CONN_SET_IP_V6
     dst_port:uint16_t:ntohs
 STRUCT LOG_ID
     log_id:char[64]
-/* DEPRECATED: replaced by CONN_PARAMS_V2. */
 STRUCT CONN_PARAMS
-    iss:uint32_t
-    irs:uint32_t
-STRUCT CONN_PARAMS_V2
     iss:uint32_t
     irs:uint32_t
     mss:uint32_t
@@ -581,18 +577,15 @@ EVENT CONN_SET_IP_V6  1  INFO  CONN  CONN_SET_IP_V6
     "IPv6 connection %1:%2 -> %3:%4"
 EVENT LOG_ID  2  INFO  CONN  LOG_ID
     "Log ID assigned: %1"
-/* DEPRECATED: replaced by CONN_PARAMS_V2. */
 EVENT CONN_PARAMS  3  INFO  CONN  CONN_PARAMS
-    "Connection parameters: ISS %1, IRS %2"
+    "Connection parameters: ISS %1, IRS %2, MSS %3, snd_wscale %4, rcv_wscale %5, flags %6, cc %7, stack %8"
 EVENT MSS  4  INFO  CONN  MSS
     "MSS set to %1 bytes"
 EVENT CONN_OWNER  5  INFO  CONN  CONN_OWNER
     "Connection owned by PID %1"
-EVENT CONN_PARAMS_V2  6  INFO  CONN  CONN_PARAMS_V2
-    "Connection parameters: ISS %1, IRS %2, MSS %3, snd_wscale %4, rcv_wscale %5, flags %6, cc %7, stack %8"
-EVENT TCP_STACK_CHANGE  7  INFO  CONN  TCP_STACK_CHANGE
+EVENT TCP_STACK_CHANGE  6  INFO  CONN  TCP_STACK_CHANGE
     "TCP stack changed to %1"
-EVENT CC_ALGO_CHANGE  8  INFO  CONN,CC  CC_ALGO_CHANGE
+EVENT CC_ALGO_CHANGE  7  INFO  CONN,CC  CC_ALGO_CHANGE
     "CC algorithm changed to %1"
 
 /* Data plane (100-199) */
