@@ -92,6 +92,7 @@
 #ifdef TCP_BLACKBOX
 #include <netinet/tcp_log_buf.h>
 #endif
+#include <eventlog/tcp_eventlog.h>
 #ifdef TCP_OFFLOAD
 #include <netinet/toecore.h>
 #endif
@@ -852,6 +853,14 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 		/* Override flowlabel from in6_pcbconnect. */
 		inp->inp_flow &= ~IPV6_FLOWLABEL_MASK;
 		inp->inp_flow |= sc->sc_flowlabel;
+
+		if (inp->inp_vflag & INP_IPV6) {
+			TCP_EVENTLOG_CONN_SET_IP_V6_LOG(tp->t_eventlog_session,
+			    inp->inp_inc.inc6_laddr,
+			    inp->inp_lport,
+			    inp->inp_inc.inc6_faddr,
+			    inp->inp_fport);
+		}
 	}
 #endif /* INET6 */
 #if defined(INET) && defined(INET6)
@@ -876,6 +885,14 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 		error = in_pcbconnect(inp, &sin, thread0.td_ucred);
 		if (error != 0)
 			goto abort;
+
+		if (inp->inp_vflag & INP_IPV4) {
+			TCP_EVENTLOG_CONN_SET_IP_V4_LOG(tp->t_eventlog_session,
+			    inp->inp_laddr,
+			    inp->inp_lport,
+			    inp->inp_faddr,
+			    inp->inp_fport);
+		}
 	}
 #endif /* INET */
 #if defined(IPSEC) || defined(IPSEC_SUPPORT)
@@ -960,6 +977,9 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	 * This might overwrite some of the defaults we just set.
 	 */
 	tcp_mss(tp, sc->sc_peer_mss);
+
+	/* Log once all handshake parameters are set. */
+	tcp_eventlog_conn_params(tp);
 
 	/*
 	 * If the SYN,ACK was retransmitted, indicate that CWND to be
