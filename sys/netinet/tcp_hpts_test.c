@@ -905,7 +905,7 @@ KTEST_FUNC(wheel_wrap_recovery)
 		KTEST_NEQUAL(tcpcbs[i], NULL);
 		TP_REMOVE_FROM_HPTS(tcpcbs[i]) = 1;
 
-		timeout_usecs = ((i * NUM_OF_HPTSI_SLOTS) / num_tcpcbs) * HPTS_USECS_PER_SLOT; /* Spread across slots */
+		timeout_usecs = 1 + ((i * NUM_OF_HPTSI_SLOTS) / num_tcpcbs) * HPTS_USECS_PER_SLOT; /* Spread across slots */
 
 		INP_WLOCK(&tcpcbs[i]->t_inpcb);
 		tcpcbs[i]->t_flags2 |= TF2_HPTS_CALLS;
@@ -1217,19 +1217,8 @@ KTEST_FUNC(slot_boundary_conditions)
 	KTEST_NEQUAL(pace, NULL);
 	tcp_hptsi_start(pace);
 
-	/* Test insertion at slot 0 */
 	tp = test_hpts_create_tcpcb(ctx, pace);
 	KTEST_NEQUAL(tp, NULL);
-	INP_WLOCK(&tp->t_inpcb);
-	tp->t_flags2 |= TF2_HPTS_CALLS;
-	tcp_hpts_insert(pace, tp, 0, NULL); /* Should insert immediately (0 timeout) */
-	INP_WUNLOCK(&tp->t_inpcb);
-	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE);
-	KTEST_VERIFY(tp->t_hpts_slot < NUM_OF_HPTSI_SLOTS);
-
-	INP_WLOCK(&tp->t_inpcb);
-	tcp_hpts_remove(pace, tp);
-	INP_WUNLOCK(&tp->t_inpcb);
 
 	/* Test insertion at maximum slot value */
 	INP_WLOCK(&tp->t_inpcb);

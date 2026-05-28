@@ -970,6 +970,7 @@ __tcp_hpts_insert(struct tcp_hptsi *pace, struct tcpcb *tp, uint32_t usecs,
 	INP_WLOCK_ASSERT(tptoinpcb(tp));
 	MPASS(!(tp->t_flags & TF_DISCONNECTED));
 	MPASS(!(tp->t_in_hpts == IHPTS_ONQUEUE));
+	MPASS(usecs > 0);
 
 	/*
 	 * Convert microseconds to slots for internal use.
@@ -999,34 +1000,7 @@ __tcp_hpts_insert(struct tcp_hptsi *pace, struct tcpcb *tp, uint32_t usecs,
 		diag->p_on_min_sleep = hpts->p_on_min_sleep;
 		diag->hpts_sleep_time = hpts->p_hpts_sleep_time;
 	}
-	if (slot == 0) {
-		/* Ok we need to set it on the hpts in the current slot */
-		tp->t_hpts_request = 0;
-		if ((hpts->p_hpts_active == 0) || (hpts->p_wheel_complete)) {
-			/*
-			 * A sleeping hpts we want in next slot to run
-			 * note that in this state p_prev_slot == p_cur_slot
-			 */
-			tp->t_hpts_slot = hpts_slot(hpts->p_prev_slot, 1);
-			if ((hpts->p_on_min_sleep == 0) &&
-			    (hpts->p_hpts_active == 0))
-				need_wakeup = true;
-		} else
-			tp->t_hpts_slot = hpts->p_runningslot;
-		if (__predict_true(tp->t_in_hpts != IHPTS_MOVING))
-			tcp_hpts_insert_internal(tp, hpts);
-		if (need_wakeup) {
-			/*
-			 * Activate the hpts if it is sleeping and its
-			 * timeout is not 1.
-			 */
-			hpts->p_direct_wake = 1;
-			tcp_hpts_wake(hpts);
-		}
-		HPTS_UNLOCK(hpts);
 
-		return;
-	}
 	/* Get the current time stamp and map it onto the wheel */
 	wheel_cts = tcp_tv_to_usec(&tv);
 	wheel_slot = cts_to_wheel(wheel_cts);
