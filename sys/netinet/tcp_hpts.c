@@ -149,6 +149,7 @@
 #include <netinet/tcp_hpts.h>
 #include <netinet/tcp_hpts_internal.h>
 #include <netinet/tcp_log_buf.h>
+#include <eventlog/hpts_eventlog.h>
 
 #ifdef tcp_offload
 #include <netinet/tcp_offload.h>
@@ -657,6 +658,9 @@ tcp_hpts_sleep(struct tcp_hpts_entry *hpts, uint32_t usec)
 	/* Store off to make visible the actual sleep time */
 	hpts->sleeping = usec;
 
+	HPTS_EVENTLOG_SLEEP_LOG(hpts->p_eventlog_session,
+	    usec);
+
 	sb = ustosbt(usec);
 	return (callout_reset_sbt_on(
 		    &hpts->co, sb, 0, tcp_hpts_sleep_timeout, hpts, hpts->p_cpu,
@@ -691,7 +695,7 @@ tcp_hpts_wake(struct tcp_hpts_entry *hpts)
 }
 
 static void
-tcp_hpts_insert_internal(struct tcpcb *tp, struct tcp_hpts_entry *hpts)
+tcp_hpts_insert_internal(struct tcpcb *tp, struct tcp_hpts_entry *hpts, uint32_t usecs)
 {
 	struct inpcb *inp = tptoinpcb(tp);
 	struct hptsh *hptsh;
@@ -719,6 +723,12 @@ tcp_hpts_insert_internal(struct tcpcb *tp, struct tcp_hpts_entry *hpts)
 	if (hpts->p_tp_cur_count > hpts->p_tp_max_count) {
 		hpts->p_tp_max_count = hpts->p_tp_cur_count;
 	}
+
+	HPTS_EVENTLOG_CONN_INSERT_LOG(hpts->p_eventlog_session,
+	    inp->inp_gencnt,
+	    tp->t_hpts_slot,
+	    usecs,
+	    hpts->p_tp_cur_count);
 }
 
 static struct tcp_hpts_entry *
@@ -774,8 +784,9 @@ __tcp_hpts_remove(struct tcp_hptsi *pace, struct tcpcb *tp)
 {
 	struct tcp_hpts_entry *hpts;
 	struct hptsh *hptsh;
+	struct inpcb *inp = tptoinpcb(tp);
 
-	INP_WLOCK_ASSERT(tptoinpcb(tp));
+	INP_WLOCK_ASSERT(inp);
 
 	hpts = tcp_hpts_lock(pace, tp);
 	if (tp->t_in_hpts == IHPTS_ONQUEUE) {
@@ -789,6 +800,11 @@ __tcp_hpts_remove(struct tcp_hptsi *pace, struct tcpcb *tp)
 			hpts->p_tp_cur_count--;
 			hpts->p_tp_remove_count++;
 			tcp_hpts_release(tp);
+
+			HPTS_EVENTLOG_CONN_REMOVE_LOG(hpts->p_eventlog_session,
+			    inp->inp_gencnt,
+			    tp->t_hpts_slot,
+			    hpts->p_tp_cur_count);
 		} else {
 			/*
 			 * tcp_hptsi() now owns the TAILQ head of this inp.
@@ -800,6 +816,11 @@ __tcp_hpts_remove(struct tcp_hptsi *pace, struct tcpcb *tp)
 			TAILQ_FOREACH(tmp, &hptsh->head, t_hpts)
 				MPASS(tmp != tp);
 #endif
+
+			HPTS_EVENTLOG_CONN_MOVE_LOG(hpts->p_eventlog_session,
+			    inp->inp_gencnt,
+			    tp->t_hpts_slot); /* old_slot before modification */
+
 			tp->t_in_hpts = IHPTS_MOVING;
 			tp->t_hpts_slot = -1;
 			hpts->p_tp_move_count++;
@@ -1093,7 +1114,7 @@ __tcp_hpts_insert(struct tcp_hptsi *pace, struct tcpcb *tp, uint32_t usecs,
 	check_if_slot_would_be_wrong(hpts, tp, tp->t_hpts_slot);
 #endif
 	if (__predict_true(tp->t_in_hpts != IHPTS_MOVING))
-		tcp_hpts_insert_internal(tp, hpts);
+		tcp_hpts_insert_internal(tp, hpts, usecs);
 	if ((hpts->p_hpts_active == 0) &&
 	    (tp->t_hpts_request == 0) &&
 	    (hpts->p_on_min_sleep == 0)) {
@@ -1294,6 +1315,12 @@ again:
 	hpts->p_wheel_complete = 0;
 	HPTS_MTX_ASSERT(hpts);
 	slots_to_run = hpts_slots_diff(hpts->p_prev_slot, hpts->p_cur_slot);
+	HPTS_EVENTLOG_PROCESSING_LOG(hpts->p_eventlog_session,
+	    from_callout,
+	    hpts->p_prev_slot,
+	    hpts->p_cur_slot,
+	    slots_to_run,
+	    hpts->p_tp_cur_count);
 	if ((hpts->p_tp_cur_count != 0) &&
 	    ((cts - cts_last_run) >
 	     hpts_slots_to_usec(hpts_num_slots - 1))) {
@@ -1316,6 +1343,13 @@ again:
 		wrap_loop_cnt++;
 		hpts->p_nxt_slot = hpts_slot(hpts->p_prev_slot, 1);
 		hpts->p_runningslot = hpts_slot(hpts->p_prev_slot, 2);
+
+		HPTS_EVENTLOG_WHEEL_WRAP_LOG(hpts->p_eventlog_session,
+		    wrap_loop_cnt,
+		    hpts_num_slots - 1,
+		    hpts->p_prev_slot,
+		    hpts->p_cur_slot);
+
 		/*
 		 * Adjust p_cur_slot to be where we are starting from
 		 * hopefully we will catch up (fat chance if something
@@ -1453,7 +1487,7 @@ again:
 						INP_WUNLOCK(inp);
 				} else {
 					HPTS_LOCK(hpts);
-					tcp_hpts_insert_internal(tp, hpts);
+					tcp_hpts_insert_internal(tp, hpts, 0);
 					HPTS_UNLOCK(hpts);
 					INP_WUNLOCK(inp);
 				}
@@ -1496,7 +1530,7 @@ again:
 						tp->t_hpts_request -=
 						    maxslots;
 					}
-					tcp_hpts_insert_internal(tp, hpts);
+					tcp_hpts_insert_internal(tp, hpts, 0);
 					HPTS_UNLOCK(hpts);
 					INP_WUNLOCK(inp);
 					continue;
@@ -1541,6 +1575,13 @@ again:
 				/* Wrap around indicates negative (early) trigger */
 				lateness_usec = 0;
 			}
+
+			HPTS_EVENTLOG_PERF_LATENESS_LOG(hpts->p_eventlog_session,
+			    inp->inp_gencnt,
+			    lateness,
+			    lateness_usec,
+			    tp->t_hpts_request_time,
+			    cts);
 
 			/*
 			 * We set TF2_HPTS_CALLS before any possible output.
@@ -1692,6 +1733,13 @@ no_run:
 
 		/* Update per-connection processing time histogram */
 		hpts_hist_lin_inc(&hpts->hist_per_tp_time, runtime_usec / tps_processed);
+
+		HPTS_EVENTLOG_PERF_PROCESSING_LOG(hpts->p_eventlog_session,
+		    from_callout,
+		    slots_processed,
+		    tps_processed,
+		    runtime_usec,
+		    loop_cnt);
 	}
 
 	/* Track the number of processing loops performed */
@@ -1792,6 +1840,12 @@ _tcp_hpts_softclock(void)
 	}
 	hpts->syscall_cnt++;
 	hpts->p_hpts_active = 1;
+
+	HPTS_EVENTLOG_STATE_ACTIVE_LOG(hpts->p_eventlog_session,
+	    0, /* from_callout */
+	    hpts->p_cur_slot,
+	    hpts->p_tp_cur_count);
+
 	slots_ran = tcp_hptsi(hpts, false);
 	usecs_ran = hpts_slots_to_usec(slots_ran);
 	/* We may want to adjust the sleep values here */
@@ -1830,6 +1884,9 @@ _tcp_hpts_softclock(void)
 		hpts->p_on_min_sleep = 1;
 	}
 	hpts->p_hpts_active = 0;
+
+	HPTS_EVENTLOG_STATE_INACTIVE_LOG(hpts->p_eventlog_session,
+	    slots_ran);
 out_with_mtx:
 	HPTS_UNLOCK(hpts);
 	NET_EPOCH_EXIT(et);
@@ -1902,6 +1959,12 @@ tcp_hpts_thread(void *ctx)
 	}
 	hpts->sleeping = 0;
 	hpts->p_hpts_active = 1;
+
+	HPTS_EVENTLOG_STATE_ACTIVE_LOG(hpts->p_eventlog_session,
+	    1, /* from_callout */
+	    hpts->p_cur_slot,
+	    hpts->p_tp_cur_count);
+
 	slots_ran = tcp_hptsi(hpts, true);
 	usecs_ran = hpts_slots_to_usec(slots_ran);
 	sleep_usec = hpts->p_hpts_sleep_time;
@@ -1976,6 +2039,9 @@ tcp_hpts_thread(void *ctx)
 	}
 	HPTS_MTX_ASSERT(hpts);
 	hpts->p_hpts_active = 0;
+
+	HPTS_EVENTLOG_STATE_INACTIVE_LOG(hpts->p_eventlog_session,
+	    slots_ran);
 back_to_sleep:
 	hpts->p_direct_wake = 0;
 	(void)tcp_hpts_sleep(hpts, sleep_usec);
@@ -2045,6 +2111,24 @@ tcp_hptsi_create(const struct tcp_hptsi_funcs *funcs, bool enable_sysctl)
 
 	memset(pace, 0, sizeof(*pace));
 	pace->funcs = funcs;
+
+	/* Create eventlog provider */
+	pace->hpts_eventlog_provider = eventlog_provider_create("hpts", NULL);
+	KASSERT(pace->hpts_eventlog_provider != NULL,
+	    ("Failed to create HPTS eventlog provider"));
+
+	/* Create "all" session for non-CPU specific events */
+	pace->hpts_eventlog_session_all = eventlog_session_create(
+	    pace->hpts_eventlog_provider, 0, true, NULL, 0);
+	KASSERT(pace->hpts_eventlog_session_all != NULL,
+	    ("Failed to create HPTS eventlog 'all' session"));
+
+	HPTS_EVENTLOG_INIT_LOG(pace->hpts_eventlog_session_all,
+	    ncpus,
+	    (uint8_t)tcp_bind_threads,
+	    hpts_num_slots,
+	    hpts_usecs_per_slot,
+	    hpts_total_slot_time);
 
 	/* Setup CPU topology information */
 #ifdef SMP
@@ -2121,6 +2205,14 @@ tcp_hptsi_create(const struct tcp_hptsi_funcs *funcs, bool enable_sysctl)
 		for (j = 0; j < hpts_num_slots; j++) {
 			TAILQ_INIT(&hpts->p_hptss[j].head);
 		}
+
+		/* Create per-CPU eventlog session */
+		hpts->p_eventlog_session = eventlog_session_create(
+			pace->hpts_eventlog_provider, (uint64_t)(i + 1), true, NULL, 0);
+		KASSERT(hpts->p_eventlog_session != NULL,
+			("Failed to create HPTS eventlog session for CPU %u", i));
+
+		HPTS_EVENTLOG_INIT_HPTS_ENTRY_LOG(hpts->p_eventlog_session);
 
 		/* Setup SYSCTL if requested */
 		if (enable_sysctl) {
@@ -2289,6 +2381,7 @@ tcp_hptsi_destroy(struct tcp_hptsi *pace)
 				sysctl_ctx_free(&hpts->hpts_ctx);
 			}
 
+			eventlog_session_destroy(hpts->p_eventlog_session);
 			mtx_destroy(&hpts->p_mtx);
 			free(hpts->p_hptss, M_TCPHPTS);
 			free(hpts, M_TCPHPTS);
@@ -2301,6 +2394,10 @@ tcp_hptsi_destroy(struct tcp_hptsi *pace)
 #ifdef SMP
 	free(pace->grps, M_TCPHPTS);
 #endif
+
+	/* Cleanup eventlog provider and "all" session */
+	eventlog_session_destroy(pace->hpts_eventlog_session_all);
+	eventlog_provider_destroy(pace->hpts_eventlog_provider);
 
 	/* Free the main structure */
 	free(pace, M_TCPHPTS);
@@ -2322,6 +2419,13 @@ tcp_hpts_mod_load(void)
 	tcp_hptsi_pace = tcp_hptsi_create(&tcp_hptsi_default_funcs, true);
 	if (tcp_hptsi_pace == NULL)
 		return (ENOMEM);
+
+	HPTS_EVENTLOG_INIT_TIMING_PARAMS_LOG(
+	    tcp_hptsi_pace->hpts_eventlog_session_all,
+	    hpts_usecs_per_slot,
+	    hpts_total_slot_time,
+	    hpts_num_slots,
+	    hpts_wheel_mask);
 
 	/* Start the threads */
 	tcp_hptsi_start(tcp_hptsi_pace);

@@ -37,6 +37,7 @@
 #if defined(_KERNEL)
 
 #include <sys/histogram.h>
+#include <sys/eventlog.h>
 
 /*
  * The HPTS slot duration and wheel size are computed at module load time.
@@ -197,6 +198,7 @@ struct tcp_hpts_entry {
 	void *ie_cookie;
 	uint16_t p_cpu;			/* The hpts CPU */
 	struct tcp_hptsi *p_hptsi;	/* Back pointer to parent hptsi structure */
+	struct eventlog_session *p_eventlog_session; /* Eventlog session for this CPU */
 	/* There is extra space in here */
 	/* Cache line 0x100 */
 	struct callout co __aligned(CACHE_LINE_SIZE);
@@ -213,6 +215,8 @@ struct tcp_hptsi {
 		int cpu[MAXCPU];
 	} domains[MAXMEMDOM];		/* Per-NUMA domain CPU assignments */
 	const struct tcp_hptsi_funcs *funcs;	/* Function table for testability */
+	struct eventlog_provider *hpts_eventlog_provider; /* Eventlog provider */
+	struct eventlog_session *hpts_eventlog_session_all; /* Eventlog session for "all" */
 };
 
 /*
