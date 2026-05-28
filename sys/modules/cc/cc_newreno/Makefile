@@ -2,4 +2,6 @@
 KMOD=	cc_newreno
 SRCS=	cc_newreno.c opt_kern_tls.h
 
+EVENTLOG_SCHEMA=	tcp_eventlog_schema.src
+
 .include <bsd.kmod.mk>

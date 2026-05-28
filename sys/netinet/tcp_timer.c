@@ -65,6 +65,7 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/tcp_seq.h>
 #include <netinet/cc/cc.h>
 #ifdef INET6
@@ -626,6 +627,13 @@ tcp_timer_rexmt(struct tcpcb *tp)
 		tcp_free_sackholes(tp);
 	}
 	TCPSTAT_INC(tcps_rexmttimeo);
+	TCP_EVENTLOG_RTO_LOG(tp->t_eventlog_session,
+	    tp->t_rxtshift,
+	    tp->t_rttlow,
+	    tp->t_srtt >> TCP_RTT_SHIFT,
+	    tp->t_maxseg,
+	    tp->snd_max - tp->snd_una,
+	    0);
 	if ((tp->t_state == TCPS_SYN_SENT) ||
 	    (tp->t_state == TCPS_SYN_RECEIVED))
 		rexmt = tcp_rexmit_initial * tcp_backoff[tp->t_rxtshift];

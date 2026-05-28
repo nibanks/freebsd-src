@@ -79,6 +79,7 @@
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/tcp_syncache.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcpip.h>
@@ -1425,6 +1426,17 @@ send:
 		    NULL);
 	else
 		lgb = NULL;
+
+	TCP_EVENTLOG_OUT_LOG(tp->t_eventlog_session,
+	    ntohl(th->th_seq),
+	    ntohl(th->th_ack),
+	    ntohs(th->th_win),
+	    len,
+	    th->th_flags,
+	    tp->snd_cwnd,
+	    th->th_off,
+	    th->th_sum,
+	    th->th_urp);
 
 	/*
 	 * Fill in IP length and desired time to live and

@@ -65,7 +65,7 @@ The options are as follows:
 Subscribe to events from the specified provider.
 .Bl -tag -width indent
 .It Ar provider
-The name of the eventlog provider.
+The name of the eventlog provider (e.g., "tcp").
 This argument is required.
 .It Ar level
 Optional log level.
@@ -106,6 +106,18 @@ current congestion window) immediately upon subscription.
 .It Fl -event-name
 Show the event name (e.g., IN, OUT, SESSION_CREATE) in square brackets
 after the session ID in each output line.
+.It Fl f Ar type
+.It Fl -format Ar type
+Rename per-session output files with connection metadata.
+The only supported
+.Ar type
+is
+.Cm tcp ,
+which renames files with TCP connection metadata.
+Files are named using the format
+.Ar log_id Ns _ Ns Ar local_port Ns _ Ns Ar remote_ip Ns _ Ns Ar remote_port Ns .elog .
+Requires
+.Fl o Cm dir= Ns Ar path .
 .It Fl n
 .It Fl -event-number
 Print a serial event number at the beginning of each output line.
@@ -121,7 +133,9 @@ Standard output always uses formatted text.
 .It Fl o Cm dir= Ns Ar path
 Write one binary file per session under
 .Ar path .
-Each session gets its own file, named by session ID.
+Each session gets its own file, named by session ID (or by TCP metadata
+when combined with
+.Fl f Cm tcp ) .
 The directory is created if it does not exist.
 .It Fl p
 .It Fl -providers
@@ -208,49 +222,49 @@ and any dropped events.
 .Sh EXIT STATUS
 .Ex -std
 .Sh EXAMPLES
-Subscribe to all events from a provider at VERBOSE level with all keywords:
+Subscribe to all TCP events at VERBOSE level with all keywords:
 .Bd -literal -offset indent
-elog -c provider
+elog -c tcp
 .Ed
 .Pp
-Subscribe to a provider at INFO level with all keywords:
+Subscribe to TCP events at INFO level with all keywords:
 .Bd -literal -offset indent
-elog -c provider INFO
+elog -c tcp INFO
 .Ed
 .Pp
-Subscribe to a provider at INFO level with specific keywords by name:
+Subscribe to TCP events at INFO level with specific keywords by name:
 .Bd -literal -offset indent
-elog -c provider INFO KEYWORD1|KEYWORD2
+elog -c tcp INFO CC|RX|TX|PACING|CONN
 .Ed
 .Pp
-Subscribe to a provider at INFO level with keywords as hex mask:
+Subscribe to TCP events at INFO level with keywords as hex mask:
 .Bd -literal -offset indent
-elog -c provider INFO 0x3F
+elog -c tcp INFO 0x3F
 .Ed
 .Pp
-Subscribe to a provider at TRACE level:
+Subscribe to all TCP events including TRACE-level detail:
 .Bd -literal -offset indent
-elog -c provider TRACE
+elog -c tcp TRACE
 .Ed
 .Pp
 Subscribe to multiple providers:
 .Bd -literal -offset indent
-elog -c provider1 INFO -c provider2 WARN
+elog -c tcp INFO -c provider WARN
 .Ed
 .Pp
 Subscribe using numeric levels:
 .Bd -literal -offset indent
-elog -c provider 3 0x3F
+elog -c tcp 3 0x3F
 .Ed
 .Pp
 Set buffer size to 4MB per CPU:
 .Bd -literal -offset indent
-elog -b 4M -c provider
+elog -b 4M -c tcp
 .Ed
 .Pp
 Write output to a file (binary format):
 .Bd -literal -offset indent
-elog -c provider -o /tmp/events.bin
+elog -c tcp -o /tmp/events.bin
 .Ed
 .Pp
 Read binary file and convert to text:
@@ -260,27 +274,27 @@ elog -r /tmp/events.bin
 .Pp
 Show relative timestamps from trace start:
 .Bd -literal -offset indent
-elog -t -c provider
+elog -t -c tcp
 .Ed
 .Pp
 Show both relative and inter-event delta timestamps:
 .Bd -literal -offset indent
-elog -t --delta-time -c provider
+elog -t --delta-time -c tcp
 .Ed
 .Pp
-Write per-session files into a directory:
+Write per-session files with TCP metadata naming:
 .Bd -literal -offset indent
-elog -o dir=/tmp/traces -c provider
+elog -o dir=/tmp/traces -f tcp -c tcp
 .Ed
 .Pp
 Print statistics on exit:
 .Bd -literal -offset indent
-elog -s -c provider
+elog -s -c tcp
 .Ed
 .Pp
 Run a fixed-duration capture, suitable for scripted use:
 .Bd -literal -offset indent
-elog --duration 30 -c provider1 -c provider2 -o /tmp/cap.elog
+elog --duration 30 -c tcp -o /tmp/cap.elog
 .Ed
 .Sh SEE ALSO
 .Xr elog 5 ,

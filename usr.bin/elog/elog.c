@@ -25,6 +25,9 @@
 #include <sys/time.h>
 #include <time.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <zlib.h>
 
 /* Include consumer header for formatting events */
@@ -64,6 +67,8 @@ static uint64_t first_event_ts = 0;
 static uint64_t prev_event_ts = 0;
 static bool dump_state = false;		/* Replay current state on subscribe */
 static char *output_dir = NULL;		/* If set, one file per session */
+/* Rename per-session files using TCP connection metadata */
+static bool format_tcp = false;
 
 /* Per-session file state for -o dir= mode */
 struct session_file {
@@ -75,6 +80,13 @@ struct session_file {
 	uint64_t capture_start;
 	uint64_t start_utc_us;
 	uint64_t event_count;
+	/* TCP connection metadata for file rename (-f tcp). */
+	char log_id[64];
+	char remote_ip[INET6_ADDRSTRLEN];
+	uint16_t local_port;
+	uint16_t remote_port;
+	bool has_log_id;
+	bool has_conn_info;
 };
 static STAILQ_HEAD(, session_file) session_files =
     STAILQ_HEAD_INITIALIZER(session_files);
@@ -149,6 +161,8 @@ usage(void)
 "  -s, --stats           Print detailed statistics on exit\n"
 "  -o, --output <file>   Write binary output to file (default: stdout)\n"
 "  -o dir=<path>         Write one binary file per session under <path>\n"
+"  -f, --format <type>   Rename per-session files using connection metadata\n"
+"                        Supported types: tcp\n"
 "  -r, --read-binary <file>\n"
 "                        Read binary file and convert to text (.gz ok)\n"
 "  -t, --relative-time   Show time relative to first event\n"
@@ -437,6 +451,107 @@ rewrite_binary_header(FILE *fp, uint64_t capture_start,
 		err(1, "fwrite(binary header)");
 }
 
+/*
+ * Extract TCP connection metadata from CONN_SET_IP_V[46] / LOG_ID
+ * events for the file-rename feature (-f tcp). Only the first log_id
+ * and first connection address seen for a session are captured.
+ */
+static void
+extract_tcp_metadata(struct session_file *sf,
+    const struct eventlog_event_header *hdr,
+    const void *payload, size_t payload_size)
+{
+	if (sf == NULL || (sf->has_log_id && sf->has_conn_info) ||
+	    strcmp(get_provider_name(hdr->provider_id), "tcp") != 0)
+		return;
+
+	switch (hdr->event_id) {
+	case TCP_EVENTLOG_CONN_SET_IP_V4_ID: {
+		const struct tcp_eventlog_conn_set_ip_v4 *evt;
+		if (sf->has_conn_info)
+			break;
+		if (payload_size < sizeof(*evt))
+			break;
+		evt = (const struct tcp_eventlog_conn_set_ip_v4 *)payload;
+		sf->local_port = ntohs(evt->src_port);
+		sf->remote_port = ntohs(evt->dst_port);
+		inet_ntop(AF_INET, &evt->dst_addr, sf->remote_ip,
+		    sizeof(sf->remote_ip));
+		sf->has_conn_info = true;
+		break;
+	}
+	case TCP_EVENTLOG_CONN_SET_IP_V6_ID: {
+		const struct tcp_eventlog_conn_set_ip_v6 *evt;
+		if (sf->has_conn_info)
+			break;
+		if (payload_size < sizeof(*evt))
+			break;
+		evt = (const struct tcp_eventlog_conn_set_ip_v6 *)payload;
+		sf->local_port = ntohs(evt->src_port);
+		sf->remote_port = ntohs(evt->dst_port);
+		inet_ntop(AF_INET6, &evt->dst_addr, sf->remote_ip,
+		    sizeof(sf->remote_ip));
+		sf->has_conn_info = true;
+		break;
+	}
+	case TCP_EVENTLOG_LOG_ID_ID: {
+		const struct tcp_eventlog_log_id *evt;
+		if (sf->has_log_id)
+			break;
+		if (payload_size < sizeof(*evt))
+			break;
+		evt = (const struct tcp_eventlog_log_id *)payload;
+		if (evt->log_id[0] != '\0') {
+			strlcpy(sf->log_id, evt->log_id, sizeof(sf->log_id));
+			sf->has_log_id = true;
+		}
+		break;
+	}
+	}
+}
+
+/*
+ * Rename a session file based on captured TCP metadata.
+ * Format: <log_id>_<local_port>_<remote_ip>_<remote_port>.elog
+ * Missing fields are replaced with "unknown". If no metadata at all,
+ * skip the rename.
+ */
+static void
+rename_session_file(struct session_file *sf)
+{
+	char newpath[PATH_MAX];
+	const char *log_id_str, *remote_ip_str;
+	char local_port_str[8], remote_port_str[8];
+
+	if (!format_tcp || sf == NULL || sf->filepath == NULL ||
+	    output_dir == NULL)
+		return;
+	if (!sf->has_log_id && !sf->has_conn_info)
+		return;
+
+	log_id_str = sf->has_log_id ? sf->log_id : "unknown";
+	remote_ip_str = sf->has_conn_info ? sf->remote_ip : "unknown";
+	if (sf->has_conn_info) {
+		snprintf(local_port_str, sizeof(local_port_str), "%u",
+		    sf->local_port);
+		snprintf(remote_port_str, sizeof(remote_port_str), "%u",
+		    sf->remote_port);
+	} else {
+		strlcpy(local_port_str, "unknown", sizeof(local_port_str));
+		strlcpy(remote_port_str, "unknown", sizeof(remote_port_str));
+	}
+
+	if (snprintf(newpath, sizeof(newpath), "%s/%s_%s_%s_%s.elog",
+	    output_dir, log_id_str, local_port_str, remote_ip_str,
+	    remote_port_str) >= (int)sizeof(newpath))
+		return;
+
+	if (rename(sf->filepath, newpath) == 0) {
+		free(sf->filepath);
+		sf->filepath = strdup(newpath);
+	}
+}
+
 static void
 close_session_file(const char *session_id)
 {
@@ -451,6 +566,7 @@ close_session_file(const char *session_id)
 			fflush(sf->fp);
 			fclose(sf->fp);
 			sf->fp = NULL;
+			rename_session_file(sf);
 			STAILQ_REMOVE(&session_files, sf, session_file, link);
 			free(sf->filepath);
 			free(sf->session_id);
@@ -515,6 +631,8 @@ write_binary_event(const struct eventlog_event_header *hdr,
 			sf->start_utc_us = utc_us;
 		}
 		sf->event_count++;
+		if (format_tcp)
+			extract_tcp_metadata(sf, hdr, payload, payload_size);
 	}
 
 	event_length = sizeof(struct eventlog_event_header) + payload_size;
@@ -1071,6 +1189,13 @@ parse_arguments(int argc, char *argv[])
 			show_delta_time = true;
 		} else if (arg_match(arg, "--dump-state", "-D")) {
 			dump_state = true;
+		} else if (arg_match(arg, "--format", "-f")) {
+			int next_idx = arg_idx + 1;
+			if (next_idx >= argc ||
+			    strcmp(argv[next_idx], "tcp") != 0)
+				errx(1, "--format requires 'tcp' argument");
+			format_tcp = true;
+			arg_idx = next_idx;
 		} else if (arg_match(arg, "--read-binary", "-r")) {
 			int next_idx = arg_idx + 1;
 			if (next_idx >= argc)
@@ -1215,6 +1340,7 @@ run_eventlog_mode(void)
 				fflush(sf->fp);
 				fclose(sf->fp);
 				sf->fp = NULL;
+				rename_session_file(sf);
 			}
 			free(sf->filepath);
 			free(sf->session_id);
