@@ -45,21 +45,27 @@
  * Schema evolution
  *
  * Event payloads are decoded by struct layout: the consumer maps an event ID
- * to a STRUCT and reads sizeof(STRUCT) bytes. Adding, removing, reordering, or
- * retyping fields in an existing STRUCT silently breaks decoding of older
- * captures that emit the same event ID with the previous payload size. The
- * supported pattern for evolving an event is:
+ * to a STRUCT and reads sizeof(STRUCT) bytes (or, for size-aware consumers,
+ * the payload length carried in the event header). Two kinds of changes are
+ * supported:
  *
- *   1. Define a new STRUCT and a new EVENT with a `_V2` (or `_V3`, ...)
- *      suffix and a new event ID; put the new fields there.
- *   2. Mark the previous STRUCT/EVENT as deprecated in a comment and stop
- *      emitting it from the kernel. The old definitions stay in the schema
- *      so older captures continue to decode.
- *   3. Consumers learn the new event ID at their own pace; old consumers
- *      that don't know the new ID render it as [UNKNOWN_EVENT_ID:N].
+ *   1. Appending fields to an existing STRUCT is allowed. Size-aware
+ *      consumers will pick up the new tail; older consumers that decode by
+ *      exact-size match must be updated (or made size-aware) before they
+ *      can read captures emitted by the new kernel. Existing on-disk
+ *      captures with the smaller payload continue to decode against the
+ *      older field list — readers should treat any missing tail fields as
+ *      zero.
  *
- * Do not append fields to an existing STRUCT or change an existing field's
- * type/order — introduce a `_V2` event instead.
+ *   2. Reordering, removing, or retyping fields in an existing STRUCT is
+ *      NOT allowed — it silently breaks decoding of older captures.
+ *      Instead, define a new STRUCT and a new EVENT with a `_V2` (or
+ *      `_V3`, ...) suffix and a new event ID, put the new fields there,
+ *      and mark the previous EVENT as deprecated in a comment while
+ *      keeping its definition so older captures continue to decode.
+ *
+ * Consumers learn new event IDs at their own pace; unrecognized event IDs
+ * render as [UNKNOWN_EVENT_ID:N].
  */
 
 PROVIDER tcp
@@ -79,6 +85,8 @@ KEYWORD TIMER       6
 KEYWORD APP         7
 /* Connection lifecycle and identity (address binding, log ID) */
 KEYWORD CONN        8
+/* High-frequency RTT samples (every SRTT update) */
+KEYWORD RTT         9
 
 /*
  * Enumerations
@@ -461,6 +469,8 @@ STRUCT GOODPUT
     gp_bw:uint64_t
     raw_bw:uint64_t
     utim:uint64_t
+    gp_srtt:uint32_t
+    lowest_rtt:uint32_t
 
 /* RTT */
 STRUCT RTT
@@ -599,12 +609,12 @@ EVENT WINDOW_COLLAPSE  205  WARN  CC  WINDOW_COLLAPSE
 EVENT HYSTART  206  TRACE  CC  HYSTART
     "Slow start round %1 completed (high_seq %2, snd_max %3, event %4)"
 EVENT GOODPUT  207  INFO  CC  GOODPUT
-    "Goodput sample %2 bps (EWMA %1 bps) over %3 us"
+    "Goodput sample %2 bps (EWMA %1 bps) over %3 us, gp_srtt %4 us, lowest_rtt %5 us"
 
 /* RTT (300-399) */
-EVENT RTT  300  INFO  CC  RTT
+EVENT RTT  300  INFO  RTT  RTT
     "RTT sample %1 us applied to srtt %2 us (path %3 us, all-time low %4 us, GP min %5 us, gp_srtt %6 us)"
-EVENT RTT_SAMPLE  301  TRACE  CC  RTT_SAMPLE
+EVENT RTT_SAMPLE  301  TRACE  RTT  RTT_SAMPLE
     "RTT sample %1 us"
 
 /* Loss / Retransmission (400-499) */
