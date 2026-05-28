@@ -176,6 +176,7 @@ dump_tcpcb(struct tcpcb *tp)
 	KTEST_LOG(ctx, "  t_hpts_slot: %d", tp->t_hpts_slot);
 	KTEST_LOG(ctx, "  t_hpts_gencnt: %u", tp->t_hpts_gencnt);
 	KTEST_LOG(ctx, "  t_hpts_request: %u", tp->t_hpts_request);
+	KTEST_LOG(ctx, "  t_hpts_request_time: %u", tp->t_hpts_request_time);
 
 	/* LRO CPU field */
 	KTEST_LOG(ctx, "  t_lro_cpu: %u", tp->t_lro_cpu);
@@ -603,6 +604,7 @@ KTEST_FUNC(tcpcb_initialization)
 	KTEST_EQUAL(tp->t_hpts_gencnt, 0);
 	KTEST_EQUAL(tp->t_hpts_slot, 0);
 	KTEST_EQUAL(tp->t_hpts_request, 0);
+	KTEST_EQUAL(tp->t_hpts_request_time, 0);
 	KTEST_EQUAL(tp->t_lro_cpu, 0);
 	KTEST_VERIFY(tp->t_hpts_cpu < pace->rp_num_hptss);
 	KTEST_EQUAL(tp->t_inpcb.inp_refcount, 1);
@@ -1677,6 +1679,175 @@ KTEST_FUNC(generation_count_validation)
 	return (0);
 }
 
+/*
+ * Test lateness_usec histogram functionality with immediate processing.
+ * Validates that connections processed immediately show minimal lateness.
+ */
+KTEST_FUNC(lateness_usec_immediate)
+{
+	struct epoch_tracker et;
+	struct tcp_hptsi *pace;
+	struct tcp_hpts_entry *hpts;
+	struct tcpcb *tp;
+
+	test_hpts_init();
+
+	pace = tcp_hptsi_create(&test_funcs, false);
+	KTEST_NEQUAL(pace, NULL);
+	tcp_hptsi_start(pace);
+
+	/* Create and insert a tcpcb with minimal delay */
+	tp = test_hpts_create_tcpcb(ctx, pace);
+	KTEST_NEQUAL(tp, NULL);
+	TP_LOG_TEST(tp) = 1;
+
+	hpts = pace->rp_ent[tp->t_hpts_cpu];
+
+	/* Insert with very small delay (should fit immediately) */
+	INP_WLOCK(&tp->t_inpcb);
+	tp->t_flags2 |= TF2_HPTS_CALLS;
+	tcp_hpts_insert(pace, tp, 100, NULL); /* 100 usec delay */
+	INP_WUNLOCK(&tp->t_inpcb);
+
+	/* Verify t_hpts_request_time was set */
+	KTEST_VERIFY(tp->t_hpts_request_time > 0);
+	KTEST_EQUAL(tp->t_hpts_request, 0); /* Should fit immediately */
+
+	TP_REMOVE_FROM_HPTS(tp) = 1;
+
+	/* Process with 50 usec lateness (150 - 100) */
+	test_time_usec += 150; /* Advance past the 100 usec delay */
+
+	/* Calculate expected bucket for 50 usec lateness */
+	uint32_t expected_lateness = 50; /* 150 - 100 */
+	uint32_t expected_bucket = flsll(expected_lateness); /* Should be 6 since 2^5=32 < 50 < 64=2^6 */
+	if (expected_bucket >= HPTS_HISTOGRAM_BUCKETS)
+		expected_bucket = HPTS_HISTOGRAM_BUCKETS - 1;
+
+	KTEST_LOG(ctx, "expected_lateness=%u, expected_bucket=%u",
+	    expected_lateness, expected_bucket);
+	KTEST_LOG(ctx, "t_hpts_request_time=%u, current_time=%u",
+	    tp->t_hpts_request_time, test_time_usec);
+
+	/* Record initial histogram state for the expected bucket */
+	uint64_t initial_bucket = hpts->hist_lateness_usec.buckets[expected_bucket];
+	uint64_t initial_total = 0;
+	for (int i = 0; i < HPTS_HISTOGRAM_BUCKETS; i++) {
+		initial_total += hpts->hist_lateness_usec.buckets[i];
+	}
+
+	KTEST_LOG(ctx, "initial_bucket[%u]=%lu, initial_total=%lu",
+	    expected_bucket, initial_bucket, initial_total);
+
+	HPTS_LOCK(hpts);
+	NET_EPOCH_ENTER(et);
+	tcp_hptsi(hpts, true);
+	HPTS_UNLOCK(hpts);
+	NET_EPOCH_EXIT(et);
+
+	/* Should have processed the connection */
+	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 1);
+
+	/* Check histogram state after processing */
+	uint64_t final_bucket = hpts->hist_lateness_usec.buckets[expected_bucket];
+	uint64_t final_total = 0;
+	for (int i = 0; i < HPTS_HISTOGRAM_BUCKETS; i++) {
+		if (hpts->hist_lateness_usec.buckets[i] > 0) {
+			KTEST_LOG(ctx, "final_bucket[%d]=%lu", i,
+			    hpts->hist_lateness_usec.buckets[i]);
+		}
+		final_total += hpts->hist_lateness_usec.buckets[i];
+	}
+
+	KTEST_LOG(ctx, "final_bucket[%u]=%lu, final_total=%lu", expected_bucket,
+	    final_bucket, final_total);
+
+	/* Check that lateness_usec histogram was updated */
+	KTEST_VERIFY(final_total > initial_total);
+
+	test_hpts_free_tcpcb(tp);
+	tcp_hptsi_stop(pace);
+	tcp_hptsi_destroy(pace);
+
+	return (0);
+}
+
+/*
+ * Test lateness_usec histogram with deferred connections.
+ * Validates that connections with t_hpts_request > 0 calculate lateness correctly.
+ */
+KTEST_FUNC(lateness_usec_deferred)
+{
+	struct epoch_tracker et;
+	struct tcp_hptsi *pace;
+	struct tcp_hpts_entry *hpts;
+	struct tcpcb *tp;
+	uint32_t original_request_time;
+	uint32_t initial_hist_total, final_hist_total;
+	int32_t slots_ran;
+	int i;
+
+	test_hpts_init();
+
+	pace = tcp_hptsi_create(&test_funcs, false);
+	KTEST_NEQUAL(pace, NULL);
+	tcp_hptsi_start(pace);
+
+	tp = test_hpts_create_tcpcb(ctx, pace);
+	KTEST_NEQUAL(tp, NULL);
+	TP_LOG_TEST(tp) = 1;
+
+	hpts = pace->rp_ent[tp->t_hpts_cpu];
+
+	/* Calculate initial histogram total */
+	initial_hist_total = 0;
+	for (i = 0; i < HPTS_HISTOGRAM_BUCKETS; i++) {
+		initial_hist_total += hpts->hist_lateness_usec.buckets[i];
+	}
+
+	/* Insert with large delay that will likely be deferred */
+	INP_WLOCK(&tp->t_inpcb);
+	tp->t_flags2 |= TF2_HPTS_CALLS;
+	tcp_hpts_insert(pace, tp, 2000000, NULL); /* 2 second delay */
+	INP_WUNLOCK(&tp->t_inpcb);
+
+	/* Record the original request time and verify deferral */
+	original_request_time = tp->t_hpts_request_time;
+	KTEST_VERIFY(original_request_time > 0);
+	KTEST_VERIFY(tp->t_hpts_request > 0); /* Should be deferred */
+
+	TP_REMOVE_FROM_HPTS(tp) = 1;
+
+	/* Advance time significantly and process */
+	test_time_usec += 1500000; /* 1.5 seconds */
+	HPTS_LOCK(hpts);
+	NET_EPOCH_ENTER(et);
+	slots_ran = tcp_hptsi(hpts, true);
+	HPTS_UNLOCK(hpts);
+	NET_EPOCH_EXIT(et);
+
+	/* Should have processed but connection might still be deferred */
+	KTEST_VERIFY(slots_ran > 0);
+
+	/* If connection was processed, histogram should be updated */
+	final_hist_total = 0;
+	for (i = 0; i < HPTS_HISTOGRAM_BUCKETS; i++) {
+		final_hist_total += hpts->hist_lateness_usec.buckets[i];
+	}
+
+	if (call_counts[CCNT_TCP_OUTPUT] > 0) {
+		/* Connection was processed, histogram should be updated */
+		KTEST_VERIFY(final_hist_total > initial_hist_total);
+	}
+
+	test_hpts_free_tcpcb(tp);
+	tcp_hptsi_stop(pace);
+	tcp_hptsi_destroy(pace);
+
+	return (0);
+}
+
+
 static const struct ktest_test_info tests[] = {
 	KTEST_INFO(module_load),
 	KTEST_INFO(hptsi_create_destroy),
@@ -1698,6 +1869,8 @@ static const struct ktest_test_info tests[] = {
 	KTEST_INFO(direct_wake_mechanism),
 	KTEST_INFO(hpts_collision_detection),
 	KTEST_INFO(generation_count_validation),
+	KTEST_INFO(lateness_usec_immediate),
+	KTEST_INFO(lateness_usec_deferred),
 };
 
 #else /* TCP_HPTS_KTEST */

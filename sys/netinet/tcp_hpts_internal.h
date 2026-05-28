@@ -198,6 +198,7 @@ struct tcp_hpts_entry {
 	struct sysctl_ctx_list hpts_ctx;
 	struct sysctl_oid *hpts_root;
 	struct hpts_histogram hist_lateness;		/* process_time - expiry_time */
+	struct hpts_histogram hist_lateness_usec;	/* lateness in microseconds */
 	struct hpts_histogram hist_tp_batch_size;	/* number of connections processed per loop */
 	struct hpts_histogram hist_slot_batch_size;	/* number of slots processed per call */
 	struct hpts_histogram hist_run_time_callout;	/* runtime for callout-triggered processing */

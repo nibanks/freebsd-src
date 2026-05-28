@@ -320,6 +320,8 @@ struct tcpcb {
 	/* HPTS. Used by BBR and Rack stacks. See tcp_hpts.c for more info. */
 	TAILQ_ENTRY(tcpcb)	t_hpts;		/* linkage to HPTS ring */
 	STAILQ_HEAD(, mbuf)	t_inqueue;	/* HPTS input packets queue */
+	uint32_t t_hpts_request_time;	/* Original requested time (usec) for
+					 * lateness calculations. */
 	uint32_t t_hpts_request;	/* Current hpts request, zero if
 					 * fits in the pacing window. */
 	uint32_t t_hpts_slot;		/* HPTS wheel slot this tcb is. */

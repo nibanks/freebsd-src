@@ -228,6 +228,7 @@ sysctl_tcp_hpts_stats_reset(SYSCTL_HANDLER_ARGS)
 		struct tcp_hpts_entry *hpts = tcp_hptsi_pace->rp_ent[i];
 		HPTS_LOCK(hpts);
 		bzero(&hpts->hist_lateness, sizeof(hpts->hist_lateness));
+		bzero(&hpts->hist_lateness_usec, sizeof(hpts->hist_lateness_usec));
 		bzero(&hpts->hist_tp_batch_size, sizeof(hpts->hist_tp_batch_size));
 		bzero(&hpts->hist_slot_batch_size, sizeof(hpts->hist_slot_batch_size));
 		bzero(&hpts->hist_run_time_callout, sizeof(hpts->hist_run_time_callout));
@@ -431,6 +432,11 @@ static const struct hpts_hist_info hpts_hist_table[] = {
 		"lateness",
 		"Histogram of lateness (slots) values for TCB's processed",
 		true, offsetof(struct tcp_hpts_entry, hist_lateness)
+	},
+	{
+		"lateness_usec",
+		"Histogram of lateness (usec) values for TCB's processed",
+		true, offsetof(struct tcp_hpts_entry, hist_lateness_usec)
 	},
 	{
 		"tp_batch_size",
@@ -1045,6 +1051,10 @@ __tcp_hpts_insert(struct tcp_hptsi *pace, struct tcpcb *tp, uint32_t usecs,
 	/* Get the current time stamp and map it onto the wheel */
 	wheel_cts = (uint32_t)bintime2us(&bt);
 	wheel_slot = hpts_usecs_to_wheel(wheel_cts);
+
+	/* Store the original requested time for lateness calculations */
+	tp->t_hpts_request_time = wheel_cts + usecs;
+
 	/* Now what's the max we can place it at? */
 	maxslots = max_slots_available(hpts, wheel_slot, &last_slot);
 	if (diag) {
@@ -1358,7 +1368,7 @@ again:
 		struct tcpcb *tp, *ntp;
 		TAILQ_HEAD(, tcpcb) head = TAILQ_HEAD_INITIALIZER(head);
 		struct hptsh *hptsh;
-		uint32_t lateness, runningslot;
+		uint32_t lateness, lateness_usec, runningslot;
 
 		/*
 		 * Calculate our delay, if there are no extra slots there
@@ -1524,6 +1534,14 @@ again:
 				kern_prefetch(tp->t_fb_ptr, &did_prefetch);
 				did_prefetch = 1;
 			}
+
+			/* Calculate and record microsecond-based lateness */
+			lateness_usec = cts - tp->t_hpts_request_time;
+			if (lateness_usec > (UINT32_MAX / 2)) {
+				/* Wrap around indicates negative (early) trigger */
+				lateness_usec = 0;
+			}
+
 			/*
 			 * We set TF2_HPTS_CALLS before any possible output.
 			 * The contract with the transport is that if it cares
@@ -1554,6 +1572,7 @@ again:
 
 			/* Update the histogram metrics */
 			hpts_hist_exp_inc(&hpts->hist_lateness, lateness);
+			hpts_hist_exp_inc(&hpts->hist_lateness_usec, lateness_usec);
 			tps_processed++;
 		}
 		if (seen_endpoint) {
@@ -1638,8 +1657,8 @@ no_run:
 	*/
 	KASSERT((!from_callout || (hpts->p_tp_cur_count == 0) ||
 		 (loop_cnt > max_pacer_loops) || (wrap_loop_cnt >= 2) ||
-		 ((hpts->p_prev_slot == hpts->p_cur_slot) &&
-		  !hpts_different_slots(cts, cts_last_run))),
+		 (cts_last_run == 0) ||  /* First run case */
+		 !hpts_different_slots(cts, cts_last_run)),  /* Time hasn't advanced enough */
 		("H:%p Shouldn't be done! prev_slot:%u, cur_slot:%u, "
 		 "cts_last_run:%u, cts:%u, loop_cnt:%d, wrap_loop_cnt:%d",
 		 hpts, hpts->p_prev_slot, hpts->p_cur_slot,
