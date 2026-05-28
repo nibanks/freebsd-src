@@ -58,11 +58,8 @@ tcp_tv_to_lusec(const struct timeval *sv)
 	return ((uint64_t)((sv->tv_sec * HPTS_USEC_IN_SEC) + sv->tv_usec));
 }
 
-static inline uint64_t
-tcp_tv_to_lusectick(const struct timeval *sv)
-{
-        return ((uint64_t)((sv->tv_sec * HPTS_USEC_IN_SEC) + sv->tv_usec));
-}
+/* Compatibility read_bbrlog code. XXX: remove dependency on this. */
+#define tcp_tv_to_lusectick timeval_to_usec64
 
 
 struct hpts_diag {
