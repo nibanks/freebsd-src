@@ -161,27 +161,5 @@ get_hpts_min_sleep_time(void)
 	return (tcp_min_hptsi_time + HPTS_USECS_PER_SLOT);
 }
 
-static inline uint64_t
-tcp_get_u64_usecs(struct timeval *tv)
-{
-	struct timeval tvd;
-
-	if (tv == NULL)
-		tv = &tvd;
-	microuptime(tv);
-	return (tcp_tv_to_lusec(tv));
-}
-
-static inline uint32_t
-tcp_get_usecs(struct timeval *tv)
-{
-	struct timeval tvd;
-
-	if (tv == NULL)
-		tv = &tvd;
-	microuptime(tv);
-	return (tcp_tv_to_usec(tv));
-}
-
 #endif /* _KERNEL */
 #endif /* __tcp_hpts_h__ */
