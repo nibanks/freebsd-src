@@ -142,7 +142,7 @@ dump_hpts_entry(struct ktest_test_context *ctx, struct tcp_hpts_entry *hpts)
 	KTEST_LOG(ctx, "  p_prev_slot: %u", hpts->p_prev_slot);
 	KTEST_LOG(ctx, "  p_nxt_slot: %u", hpts->p_nxt_slot);
 	KTEST_LOG(ctx, "  p_runningslot: %u", hpts->p_runningslot);
-	KTEST_LOG(ctx, "  p_on_queue_cnt: %d", hpts->p_on_queue_cnt);
+	KTEST_LOG(ctx, "  p_tp_cur_count: %d", hpts->p_tp_cur_count);
 	KTEST_LOG(ctx, "  p_hpts_active: %u", hpts->p_hpts_active);
 	KTEST_LOG(ctx, "  p_wheel_complete: %u", hpts->p_wheel_complete);
 	KTEST_LOG(ctx, "  p_direct_wake: %u", hpts->p_direct_wake);
@@ -465,7 +465,7 @@ KTEST_FUNC(hptsi_create_destroy)
 		KTEST_NEQUAL(pace->rp_ent[i], NULL);
 		KTEST_EQUAL(pace->rp_ent[i]->p_cpu, i);
 		KTEST_EQUAL(pace->rp_ent[i]->p_hptsi, pace);
-		KTEST_EQUAL(pace->rp_ent[i]->p_on_queue_cnt, 0);
+		KTEST_EQUAL(pace->rp_ent[i]->p_tp_cur_count, 0);
 	}
 
 	tcp_hptsi_destroy(pace);
@@ -651,7 +651,7 @@ KTEST_FUNC(tcpcb_insertion)
 	KTEST_VERIFY(tp->t_hpts_slot < NUM_OF_HPTSI_SLOTS);
 
 	hpts = pace->rp_ent[tp->t_hpts_cpu];
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 1);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 	KTEST_EQUAL(tp->t_hpts_request, 0);
 	KTEST_EQUAL(tp->t_hpts_slot, HPTS_USEC_TO_SLOTS(timeout_usecs));
 	//KTEST_EQUAL(tp->t_hpts_gencnt, 1);
@@ -663,7 +663,7 @@ KTEST_FUNC(tcpcb_insertion)
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 0);
 	KTEST_VERIFY(!tcp_in_hpts(tp));
 
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 0);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 0);
 
 	test_hpts_free_tcpcb(tp);
 	tcp_hptsi_stop(pace);
@@ -716,7 +716,7 @@ KTEST_FUNC(timer_functionality)
 		dump_hpts_entry(ctx, pace->rp_ent[i]);
 
 	hpts = pace->rp_ent[tp->t_hpts_cpu];
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 1);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 	KTEST_EQUAL(hpts->p_prev_slot, 0);
 	KTEST_EQUAL(hpts->p_cur_slot, 0);
 	KTEST_EQUAL(hpts->p_runningslot, 0);
@@ -768,7 +768,7 @@ KTEST_FUNC(timer_functionality)
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE);
 	KTEST_EQUAL(tp->t_hpts_request, 0);
 	KTEST_EQUAL(tp->t_hpts_slot, HPTS_USEC_TO_SLOTS(500));
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 1);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 
 	/* Wait for 1 more usec and trigger the HPTS workers and verify it
 	 * triggers tcp_output this time */
@@ -791,7 +791,7 @@ KTEST_FUNC(timer_functionality)
 	dump_tcpcb(tp);
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 1);
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_NONE);
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 0);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 0);
 
 	test_hpts_free_tcpcb(tp);
 	tcp_hptsi_stop(pace);
@@ -842,7 +842,7 @@ KTEST_FUNC(scalability_tcpcbs)
 
 	/* Verify total queue counts across all CPUs */
 	for (i = 0; i < pace->rp_num_hptss; i++) {
-		total_queued += pace->rp_ent[i]->p_on_queue_cnt;
+		total_queued += pace->rp_ent[i]->p_tp_cur_count;
 	}
 	KTEST_EQUAL(total_queued, num_tcpcbs);
 
@@ -861,8 +861,8 @@ KTEST_FUNC(scalability_tcpcbs)
 
 	/* Verify all queues are now empty */
 	for (i = 0; i < pace->rp_num_hptss; i++) {
-		if (pace->rp_ent[i]->p_on_queue_cnt != 0) {
-			KTEST_ERR(ctx, "FAIL: pace->rp_ent[i]->p_on_queue_cnt != 0");
+		if (pace->rp_ent[i]->p_tp_cur_count != 0) {
+			KTEST_ERR(ctx, "FAIL: pace->rp_ent[i]->p_tp_cur_count != 0");
 			return (EINVAL);
 		}
 	}
@@ -918,7 +918,7 @@ KTEST_FUNC(wheel_wrap_recovery)
 
 	for (i = 0; i < pace->rp_num_hptss; i++) {
 		KTEST_LOG(ctx, "=> tcp_hptsi(%u)", i);
-		KTEST_NEQUAL(pace->rp_ent[i]->p_on_queue_cnt, 0);
+		KTEST_NEQUAL(pace->rp_ent[i]->p_tp_cur_count, 0);
 
 		HPTS_LOCK(pace->rp_ent[i]);
 		NET_EPOCH_ENTER(et);
@@ -927,7 +927,7 @@ KTEST_FUNC(wheel_wrap_recovery)
 		NET_EPOCH_EXIT(et);
 
 		KTEST_EQUAL(slots_ran, NUM_OF_HPTSI_SLOTS-1); /* Should process all slots */
-		KTEST_EQUAL(pace->rp_ent[i]->p_on_queue_cnt, 0);
+		KTEST_EQUAL(pace->rp_ent[i]->p_tp_cur_count, 0);
 		KTEST_NEQUAL(pace->rp_ent[i]->p_cur_slot,
 			pace->rp_ent[i]->p_prev_slot);
 	}
@@ -1299,7 +1299,7 @@ KTEST_FUNC(dynamic_sleep_adjustment)
 	dump_hpts_entry(ctx, hpts);
 
 	/* Verify we're above threshold */
-	KTEST_GREATER_THAN(hpts->p_on_queue_cnt, DEFAULT_CONNECTION_THRESHOLD);
+	KTEST_GREATER_THAN(hpts->p_tp_cur_count, DEFAULT_CONNECTION_THRESHOLD);
 
 	/* Run HPTS to process many connections */
 	test_time_usec += 100;
@@ -1314,7 +1314,7 @@ KTEST_FUNC(dynamic_sleep_adjustment)
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], num_tcpcbs);
 
 	/* Verify all connections were removed from queue */
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 0);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 0);
 
 	/* Cleanup */
 	for (i = 0; i < num_tcpcbs; i++) {
@@ -1374,7 +1374,7 @@ KTEST_FUNC(concurrent_operations)
 	/* Verify queue count reflects both connections */
 	KTEST_EQUAL(tp1->t_hpts_cpu, tp2->t_hpts_cpu); /* Should be on same CPU */
 	hpts = pace->rp_ent[tp1->t_hpts_cpu];
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 2);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 2);
 
 	/* Remove tp1 while tp2 is still there */
 	INP_WLOCK(&tp1->t_inpcb);
@@ -1386,7 +1386,7 @@ KTEST_FUNC(concurrent_operations)
 	KTEST_EQUAL(tp2->t_in_hpts, IHPTS_ONQUEUE);
 
 	/* Verify queue count decreased by one */
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 1);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 
 	/* Remove tp2 */
 	INP_WLOCK(&tp2->t_inpcb);
@@ -1396,7 +1396,7 @@ KTEST_FUNC(concurrent_operations)
 	KTEST_EQUAL(tp2->t_in_hpts, IHPTS_NONE);
 
 	/* Verify queue is now completely empty */
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 0);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 0);
 
 	test_hpts_free_tcpcb(tp1);
 	test_hpts_free_tcpcb(tp2);
@@ -1494,7 +1494,7 @@ KTEST_FUNC(direct_wake_mechanism)
 
 	/* Test direct wake when not over threshold */
 	HPTS_LOCK(hpts);
-	hpts->p_on_queue_cnt = 50; /* Below threshold */
+	hpts->p_tp_cur_count = 50; /* Below threshold */
 	hpts->p_hpts_wake_scheduled = 0;
 	tcp_hpts_wake(hpts);
 	KTEST_EQUAL_GOTO(hpts->p_hpts_wake_scheduled, 1, cleanup_locked);
@@ -1507,7 +1507,7 @@ KTEST_FUNC(direct_wake_mechanism)
 
 	/* Test wake inhibition when over threshold */
 	HPTS_LOCK(hpts);
-	hpts->p_on_queue_cnt = 200; /* Above threshold */
+	hpts->p_tp_cur_count = 200; /* Above threshold */
 	hpts->p_direct_wake = 1; /* Request direct wake */
 	tcp_hpts_wake(hpts);
 	KTEST_EQUAL_GOTO(hpts->p_hpts_wake_scheduled, 0, cleanup_locked);
