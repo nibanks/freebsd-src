@@ -159,7 +159,7 @@ dump_hpts_entry(struct ktest_test_context *ctx, struct tcp_hpts_entry *hpts)
 	KTEST_LOG(ctx, "  p_cpu: %u", hpts->p_cpu);
 	KTEST_LOG(ctx, "  ie_cookie: %p", hpts->ie_cookie);
 	KTEST_LOG(ctx, "  p_hptsi: %p", hpts->p_hptsi);
-	KTEST_LOG(ctx, "  p_mysleep: %ld.%06ld", hpts->p_mysleep.tv_sec, hpts->p_mysleep.tv_usec);
+	KTEST_LOG(ctx, "  p_mysleep_usec: %u", hpts->p_mysleep_usec);
 }
 
 static void
@@ -195,7 +195,7 @@ dump_tcpcb(struct tcpcb *tp)
 
 /* Enum for call counting indices */
 enum test_call_counts {
-	CCNT_MICROUPTIME = 0,
+	CCNT_BINUPTIME = 0,
 	CCNT_SWI_ADD,
 	CCNT_SWI_REMOVE,
 	CCNT_SWI_SCHED,
@@ -224,11 +224,13 @@ test_hpts_init(void)
 }
 
 static void
-test_microuptime(struct timeval *tv)
+test_binuptime(struct bintime *bt)
 {
-	call_counts[CCNT_MICROUPTIME]++;
-	tv->tv_sec = test_time_usec / 1000000;
-	tv->tv_usec = test_time_usec % 1000000;
+	sbintime_t sbt;
+
+	call_counts[CCNT_BINUPTIME]++;
+	sbt = ustosbt(test_time_usec);
+	*bt = sbttobt(sbt);
 }
 
 static int
@@ -299,7 +301,7 @@ test_callout_stop_safe(struct callout *c, int flags)
 }
 
 static const struct tcp_hptsi_funcs test_funcs = {
-	.microuptime = test_microuptime,
+	.binuptime = test_binuptime,
 	.swi_add = test_swi_add,
 	.swi_remove = test_swi_remove,
 	.swi_sched = test_swi_sched,
@@ -549,7 +551,7 @@ KTEST_FUNC(function_injection)
 	pace = tcp_hptsi_create(&test_funcs, false);
 	KTEST_NEQUAL(pace, NULL);
 	KTEST_EQUAL(pace->funcs, &test_funcs);
-	KTEST_VERIFY(call_counts[CCNT_MICROUPTIME] > 0);
+	KTEST_VERIFY(call_counts[CCNT_BINUPTIME] > 0);
 	KTEST_VERIFY(call_counts[CCNT_CALLOUT_INIT] > 0);
 
 	tcp_hptsi_start(pace);

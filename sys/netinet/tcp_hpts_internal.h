@@ -107,7 +107,7 @@ extern int tcp_bind_threads; 		/* Thread binding configuration
  * Abstraction layer controlling time, interrupts and callouts.
  */
 struct tcp_hptsi_funcs {
-	void (*microuptime)(struct timeval *tv);
+	void (*binuptime)(struct bintime *bt);
 	int (*swi_add)(struct intr_event **eventp, const char *name,
 		driver_intr_t handler, void *arg, int pri, enum intr_type flags,
 		void **cookiep);
@@ -158,7 +158,7 @@ static inline void hpts_hist_linear_inc(struct hpts_histogram *hist,
 struct tcp_hpts_entry {
 	/* Cache line 0x00 */
 	struct mtx p_mtx;		/* Mutex for hpts */
-	struct timeval p_mysleep;	/* Our min sleep time */
+	uint32_t p_mysleep_usec;	/* Our min sleep time in microseconds */
 	uint64_t syscall_cnt;
 	uint64_t sleeping;		/* What the actual sleep was (if sleeping) */
 	uint16_t p_hpts_active; 	/* Flag that says hpts is awake  */
