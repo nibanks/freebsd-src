@@ -36,6 +36,8 @@
 
 #if defined(_KERNEL)
 
+#include <sys/histogram.h>
+
 /*
  * The HPTS slot duration and wheel size are computed at module load time.
  * The slot duration defaults to 64 microseconds per slot, and the total
@@ -126,34 +128,19 @@ struct tcp_hptsi_funcs {
 /* Default function table for system operation */
 extern const struct tcp_hptsi_funcs tcp_hptsi_default_funcs;
 
-#define HPTS_HISTOGRAM_BUCKETS 16
-
-/* Histogram for tracking various metrics */
-struct hpts_histogram {
-	uint64_t buckets[HPTS_HISTOGRAM_BUCKETS];
-};
-
-/* Increment the 'log2 of the value' bucket by one */
-static inline void hpts_hist_exp_inc(struct hpts_histogram *hist,
-	uint64_t value) {
-	uint32_t bucket = flsll(value);
-	if (__predict_false(bucket >= HPTS_HISTOGRAM_BUCKETS))
-		bucket = HPTS_HISTOGRAM_BUCKETS - 1;
-	hist->buckets[bucket]++;
-}
-/* Increment the linear bucket by one */
-static inline void hpts_hist_linear_inc(struct hpts_histogram *hist,
-	uint64_t value) {
-	if (__predict_false(value >= HPTS_HISTOGRAM_BUCKETS))
-		value = HPTS_HISTOGRAM_BUCKETS - 1;
-	hist->buckets[value]++;
-}
-
 /* Each hpts has its own p_mtx which is used for locking */
 #define	HPTS_MTX_ASSERT(hpts)	mtx_assert(&(hpts)->p_mtx, MA_OWNED)
 #define	HPTS_LOCK(hpts)		mtx_lock(&(hpts)->p_mtx)
 #define	HPTS_TRYLOCK(hpts)	mtx_trylock(&(hpts)->p_mtx)
 #define	HPTS_UNLOCK(hpts)	mtx_unlock(&(hpts)->p_mtx)
+
+/* All HPTS histograms use the same number of buckets */
+#define HPTS_HISTOGRAM_BUCKETS 16
+/* HPTS histograms: some are linear, some are exponential */
+HISTOGRAM_DECLARE(hpts_hist_lin, HPTS_HISTOGRAM_BUCKETS);
+HISTOGRAM_LIN_GENERATE(hpts_hist_lin);
+HISTOGRAM_DECLARE(hpts_hist_exp, HPTS_HISTOGRAM_BUCKETS);
+HISTOGRAM_EXP_GENERATE(hpts_hist_exp);
 
 struct tcp_hpts_entry {
 	/* Cache line 0x00 */
@@ -197,15 +184,15 @@ struct tcp_hpts_entry {
 	/* Cache line 0x80 */
 	struct sysctl_ctx_list hpts_ctx;
 	struct sysctl_oid *hpts_root;
-	struct hpts_histogram hist_lateness;		/* process_time - expiry_time */
-	struct hpts_histogram hist_lateness_usec;	/* lateness in microseconds */
-	struct hpts_histogram hist_tp_batch_size;	/* number of connections processed per loop */
-	struct hpts_histogram hist_slot_batch_size;	/* number of slots processed per call */
-	struct hpts_histogram hist_run_time_callout;	/* runtime for callout-triggered processing */
-	struct hpts_histogram hist_run_time_oppor;	/* runtime for opportunistic processing */
-	struct hpts_histogram hist_insert_slots;	/* slots requested for timer insertions */
-	struct hpts_histogram hist_per_tp_time;		/* average processing time per connection */
-	struct hpts_histogram hist_processing_loops;	/* number of processing loops per tcp_hptsi call */
+	struct hpts_hist_exp hist_lateness;		/* process_time - expiry_time */
+	struct hpts_hist_exp hist_lateness_usec;	/* lateness in microseconds */
+	struct hpts_hist_lin hist_tp_batch_size;	/* number of connections processed per loop */
+	struct hpts_hist_exp hist_slot_batch_size;	/* number of slots processed per call */
+	struct hpts_hist_exp hist_run_time_callout;	/* runtime for callout-triggered processing */
+	struct hpts_hist_exp hist_run_time_oppor;	/* runtime for opportunistic processing */
+	struct hpts_hist_exp hist_insert_slots;		/* slots requested for timer insertions */
+	struct hpts_hist_lin hist_per_tp_time;		/* average processing time per connection */
+	struct hpts_hist_lin hist_processing_loops;	/* number of processing loops per tcp_hptsi call */
 	struct intr_event *ie;
 	void *ie_cookie;
 	uint16_t p_cpu;			/* The hpts CPU */

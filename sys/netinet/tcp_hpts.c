@@ -508,13 +508,13 @@ sysctl_tcp_hpts_hist_aggregate(SYSCTL_HANDLER_ARGS)
 	total = 0;
 	for (i = 0; i < pace->rp_num_hptss; i++) {
 		struct tcp_hpts_entry *hpts = pace->rp_ent[i];
-		struct hpts_histogram *hist;
+		void *hist;
 
 		KASSERT(hpts != NULL, ("hpts is NULL"));
 
 		/* Calculate histogram pointer using offset */
-		hist = (struct hpts_histogram *)((char *)hpts + hist_offset);
-		total += hist->buckets[bucket_idx];
+		hist = (char *)hpts + hist_offset;
+		total += ((uint64_t *)hist)[bucket_idx];
 	}
 
 	return (sysctl_handle_64(oidp, &total, 0, req));
@@ -1675,7 +1675,7 @@ no_run:
 		tcp_hpts_set_max_sleep(hpts, wrap_loop_cnt);
 	}
 
-	hpts_hist_linear_inc(&hpts->hist_tp_batch_size, tps_processed);
+	hpts_hist_lin_inc(&hpts->hist_tp_batch_size, tps_processed);
 	hpts_hist_exp_inc(&hpts->hist_slot_batch_size, slots_processed);
 
 	/* Only measure runtime if we actually processed connections */
@@ -1691,11 +1691,11 @@ no_run:
 		}
 
 		/* Update per-connection processing time histogram */
-		hpts_hist_linear_inc(&hpts->hist_per_tp_time, runtime_usec / tps_processed);
+		hpts_hist_lin_inc(&hpts->hist_per_tp_time, runtime_usec / tps_processed);
 	}
 
 	/* Track the number of processing loops performed */
-	hpts_hist_linear_inc(&hpts->hist_processing_loops, loop_cnt);
+	hpts_hist_lin_inc(&hpts->hist_processing_loops, loop_cnt);
 
 	if (seen_endpoint)
 		return(hpts_slots_diff(slot_pos_of_endpoint, orig_exit_slot));

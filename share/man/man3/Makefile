@@ -11,6 +11,7 @@ MAN=		alloca.3 \
 		CMSG_DATA.3 \
 		end.3 \
 		fpgetround.3 \
+		histogram.3 \
 		intro.3 \
 		makedev.3 \
 		offsetof.3 \

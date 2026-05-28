@@ -1,0 +1,163 @@
+.\" Copyright (c) 2025 Netflix, Inc.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd January 6, 2026
+.Dt HISTOGRAM 3
+.Os
+.Sh NAME
+.Nm HISTOGRAM_DECLARE ,
+.Nm HISTOGRAM_LIN_GENERATE ,
+.Nm HISTOGRAM_EXP_GENERATE
+.Nd implementations of histogram data structures for tracking metrics
+.Sh SYNOPSIS
+.In sys/histogram.h
+.Fn HISTOGRAM_DECLARE "name" "max_buckets"
+.Fn HISTOGRAM_LIN_GENERATE "name"
+.Fn HISTOGRAM_EXP_GENERATE "name"
+.Sh DESCRIPTION
+These macros define histogram data structures for tracking metrics
+with compile-time constant bucket counts.
+.Pp
+The
+.Fn HISTOGRAM_DECLARE
+macro defines a histogram structure containing a
+.Vt uint64_t
+array of
+.Fa max_buckets
+buckets.
+.Pp
+The
+.Fn HISTOGRAM_LIN_GENERATE
+macro generates functions for a linear histogram where values map directly
+to bucket indices.
+Values greater than or equal to
+.Fa max_buckets
+are clamped to the last bucket.
+Linear histograms are ideal for tracking small integer values such as
+segment counts.
+.Pp
+The
+.Fn HISTOGRAM_EXP_GENERATE
+macro generates functions for an exponential (log2-based) histogram where
+values are mapped to buckets using the floor of the logarithm base 2.
+Exponential histograms are ideal for tracking values over wide ranges
+such as bandwidth (Mbps), latency (microseconds), or byte counts.
+.Pp
+Both generate macros create:
+.Bl -bullet -offset indent
+.It
+An increment function
+.Fn "name##_inc"
+that increments the appropriate bucket for a given value.
+.It
+A weighted increment function
+.Fn "name##_inc_weighted"
+that adds a weight value to the appropriate bucket for a given value.
+.El
+.Pp
+Histogram structures must be zero-initialized before use.
+Use
+.Fn bzero
+or
+.Fn memset
+to initialize the structure:
+.Bd -literal -offset indent
+bzero(&hist, sizeof(hist));
+.Ed
+.Pp
+In the macro definitions,
+.Fa name
+is the name of the histogram type to be defined.
+The generated structure will be named
+.Fa name
+and the generated functions will be prefixed with
+.Fa name
+followed by an underscore.
+.Fa max_buckets
+is a compile-time constant specifying the number of buckets in the histogram.
+.Sh LINEAR HISTOGRAM EXAMPLE
+.Bd -literal
+#include <sys/histogram.h>
+
+/* Define a linear histogram type with 64 buckets */
+HISTOGRAM_DECLARE(segments_hist_type, 64);
+HISTOGRAM_LIN_GENERATE(segments_hist_type);
+
+/* Declare a histogram instance */
+static struct segments_hist_type segments_hist;
+
+/* Initialize the histogram (zeros all buckets) */
+bzero(&segments_hist, sizeof(segments_hist));
+
+/* Increment bucket for value 5 */
+segments_hist_type_inc(&segments_hist, 5);
+
+/* Increment bucket for value 10 with weight 1500 (bytes) */
+segments_hist_type_inc_weighted(&segments_hist, 10, 1500);
+
+/* Access bucket values directly */
+uint64_t count = segments_hist.buckets[5];
+.Ed
+.Sh EXPONENTIAL HISTOGRAM EXAMPLE
+.Bd -literal
+#include <sys/histogram.h>
+
+/* Define an exponential histogram type with 16 buckets */
+HISTOGRAM_DECLARE(gput_hist_type, 16);
+HISTOGRAM_EXP_GENERATE(gput_hist_type);
+
+/* Declare a histogram instance */
+static struct gput_hist_type gput_hist;
+
+/* Initialize the histogram (zeros all buckets) */
+bzero(&gput_hist, sizeof(gput_hist));
+
+/* Increment bucket for value 50 */
+gput_hist_type_inc(&gput_hist, 50);
+
+/* Increment bucket for value 1000 */
+gput_hist_type_inc(&gput_hist, 1000);
+
+/* Access bucket values directly */
+uint64_t count = gput_hist.buckets[10];
+.Ed
+.Sh IMPLEMENTATION NOTES
+The histogram macros generate type-specific structures and functions at compile time.
+This approach provides type safety and allows the compiler to optimize
+the generated code.
+.Pp
+Linear histograms use direct indexing:
+.Bd -literal -offset indent
+if (value >= max_buckets)
+    value = max_buckets - 1;
+buckets[value]++;
+.Ed
+.Pp
+Exponential histograms use log2 mapping to determine the appropriate bucket.
+.Sh SEE ALSO
+(No cross-references.)
+.Sh HISTORY
+The
+.Nm histogram
+macros first appeared in Netflix OCA firmware in 2026.
+
