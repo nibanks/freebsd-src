@@ -37,36 +37,65 @@
 #if defined(_KERNEL)
 
 /*
- * The hpts uses a 102400 wheel. The wheel
- * defines the time in 10 usec increments (102400 x 10).
- * This gives a range of 10usec - 1024ms to place
- * an entry within. If the user requests more than
- * 1.024 second, a remaineder is attached and the hpts
- * when seeing the remainder will re-insert the
- * inpcb forward in time from where it is until
- * the remainder is zero.
+ * The HPTS slot duration and wheel size are computed at module load time.
+ * The slot duration defaults to 64 microseconds per slot, and the total
+ * wheel time defaults to 1.048576 seconds (1048576 microseconds). Both values
+ * can be tuned at runtime via loader tunables (which requires a reboot to take
+ * effect). The values are restricted to powers of two to avoid multiplication
+ * and division operations.
+ *
+ * If the connection requests a timeout longer than the wheel can accommodate,
+ * a remainder is stored and the HPTS will re-insert the inpcb with the
+ * remaining time when the wheel completes its current cycle.
  */
 
-#define NUM_OF_HPTSI_SLOTS 102400
+/* Defaults and limits */
+#define HPTS_DEFAULT_TOTAL_SLOT_TIME 0x100000U /* 1,048,576 microseconds */
+#define HPTS_MAX_TOTAL_SLOT_TIME 0x4000000U    /* 67,108,864 microseconds */
+#define HPTS_MIN_TOTAL_SLOTS 2U
+#define HPTS_DEFAULT_USECS_PER_SLOT 64U
+#define HPTS_MAX_USECS_PER_SLOT 0x10000U       /* 65,536 microseconds */
 
-/* The number of connections after which the dynamic sleep logic kicks in. */
-#define DEFAULT_CONNECTION_THRESHOLD 100
-
-/*
- * The hpts uses a 102400 wheel. The wheel
- * defines the time in 10 usec increments (102400 x 10).
- * This gives a range of 10usec - 1024ms to place
- * an entry within. If the user requests more than
- * 1.024 second, a remaineder is attached and the hpts
- * when seeing the remainder will re-insert the
- * inpcb forward in time from where it is until
- * the remainder is zero.
- */
-
-#define NUM_OF_HPTSI_SLOTS 102400
+/* Total time covered by all HPTS slots in microseconds (power of two) */
+extern uint32_t hpts_total_slot_time;
+/* Effective microseconds per slot (power-of-two) */
+extern uint32_t hpts_usecs_per_slot;
+/* log2(hpts_usecs_per_slot) for fast division */
+extern uint32_t hpts_usecs_per_slot_shift;
+/* Total slots on the wheel (power-of-two) */
+extern uint32_t hpts_num_slots;
+/* hpts_num_slots - 1, used for fast modulo */
+extern uint32_t hpts_wheel_mask;
 
 /* Convert microseconds to HPTS slots */
-#define HPTS_USEC_TO_SLOTS(x) ((x+9) /10)
+static inline uint32_t hpts_usec_to_slots(uint32_t usec)
+{
+	return ((usec + (hpts_usecs_per_slot - 1)) >> hpts_usecs_per_slot_shift);
+}
+
+/* Convert HPTS slots to microseconds */
+static inline uint32_t hpts_slots_to_usec(uint32_t slots)
+{
+	return (slots << hpts_usecs_per_slot_shift);
+}
+
+/* Map absolute microseconds to the wheel position */
+static inline uint32_t hpts_usecs_to_wheel(uint32_t usec)
+{
+	return ((usec >> hpts_usecs_per_slot_shift) & hpts_wheel_mask);
+}
+
+/* Add slots to a wheel position (wrap via mask) */
+static inline uint32_t hpts_wheel_add(uint32_t wheel_slot, uint32_t plus)
+{
+	return ((wheel_slot + plus) & hpts_wheel_mask);
+}
+
+/* Check if two timestamps are in different slots */
+static inline bool hpts_different_slots(uint32_t a, uint32_t b)
+{
+	return ((a >> hpts_usecs_per_slot_shift) != (b >> hpts_usecs_per_slot_shift));
+}
 
 /* The number of connections after which the dynamic sleep logic kicks in. */
 #define DEFAULT_CONNECTION_THRESHOLD 100
@@ -160,8 +189,7 @@ struct tcp_hpts_entry {
 		uint32_t		count;
 		uint32_t		gencnt;
 	} *p_hptss;			/* Hptsi wheel */
-	uint32_t p_hpts_sleep_time;	/* Current sleep interval having a max
-					 * of 255ms */
+	uint32_t p_hpts_sleep_time;	/* Current sleep interval in microseconds */
 	uint32_t overidden_sleep;	/* what was overrided by min-sleep for logging */
 	uint32_t saved_curslot;		/* for logging */
 	uint32_t saved_prev_slot;	/* for logging */
@@ -208,7 +236,7 @@ void tcp_hptsi_destroy(struct tcp_hptsi *pace);
 void tcp_hptsi_start(struct tcp_hptsi *pace);
 void tcp_hptsi_stop(struct tcp_hptsi *pace);
 uint16_t tcp_hptsi_random_cpu(struct tcp_hptsi *pace);
-int32_t tcp_hptsi(struct tcp_hpts_entry *hpts, bool from_callout);
+uint32_t tcp_hptsi(struct tcp_hpts_entry *hpts, bool from_callout);
 
 void tcp_hpts_wake(struct tcp_hpts_entry *hpts);
 

@@ -27,7 +27,11 @@
 #define __tcp_hpts_h__
 
 /* Number of useconds represented by an hpts slot */
-#define HPTS_USECS_PER_SLOT 10
+extern uint32_t hpts_usecs_per_slot; /* effective runtime */
+
+/* Compatibility tcp_stack code. XXX: remove dependency on this. */
+#define HPTS_USECS_PER_SLOT hpts_usecs_per_slot
+
 #define HPTS_USEC_IN_SEC 1000000
 #define HPTS_MSEC_IN_SEC 1000
 #define HPTS_USEC_IN_MSEC 1000
