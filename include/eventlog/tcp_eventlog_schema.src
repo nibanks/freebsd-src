@@ -100,6 +100,7 @@ ENUM timer_reason
     4:RXT
     5:PERSIST
     6:KEEPALIVE
+    7:TWOMSL
 
 ENUM tcp_state
     0:CLOSED
@@ -150,7 +151,8 @@ ENUM socket_option
     77:TCP_USE_CMP_ACKS
     78:TCP_PERF_INFO
     79:TCP_RST_REASON_CODE
-    80:TCP_EVENTLOG
+    80:TCP_RST_REASON_ENABLE
+    81:TCP_EVENTLOG
     128:TCP_KEEPINIT
     256:TCP_KEEPIDLE
     512:TCP_KEEPINTVL
@@ -330,6 +332,7 @@ FLAG timer_type
     0x08:RXT
     0x10:PERSIST
     0x20:KEEP
+    0x40:TWOMSL
 
 FLAG conn_params_flags
     0x01:CP_SACK_PERMIT
@@ -381,9 +384,10 @@ STRUCT CONN_OWNER
 STRUCT IN
     seq:uint32_t
     ack:uint32_t
+    flags:uint16_t:flag_tcp_flags
+    win_raw:uint16_t
     win:uint32_t
     len:uint32_t
-    flags:uint16_t:flag_tcp_flags
     state:uint8_t:enum_tcp_state
     th_off:uint8_t
     th_sum:uint16_t:hex
@@ -392,10 +396,12 @@ STRUCT IN
 STRUCT OUT
     seq:uint32_t
     ack:uint32_t
+    flags:uint16_t:flag_tcp_flags
+    win_raw:uint16_t
     win:uint32_t
     len:uint32_t
-    flags:uint16_t:flag_tcp_flags
     cwnd:uint32_t
+    state:uint8_t:enum_tcp_state
     th_off:uint8_t
     th_sum:uint16_t:hex
     th_urp:uint16_t
@@ -508,7 +514,7 @@ STRUCT DSACK
 
 /* Scheduling / Timers */
 STRUCT TIMER_START
-    timeout:uint32_t
+    timeout_us:uint32_t
     reason:uint8_t:enum_timer_reason
 STRUCT TIMER_FIRED
     timer_type:uint32_t:flag_timer_type
@@ -581,9 +587,9 @@ EVENT CC_ALGO_CHANGE  7  INFO  CONN,CC  CC_ALGO_CHANGE
 
 /* Data plane (100-199) */
 EVENT IN  100  VERBOSE  RX  IN
-    "Received %4 bytes (seq %1, ack %2, win %3, flags %5) in state %6 rcv_time %10 us"
+    "Received %6 bytes (seq %1, ack %2, win %5, flags %3) in state %7 rcv_time %11 us"
 EVENT OUT  101  VERBOSE  TX  OUT
-    "Sent %4 bytes (seq %1, ack %2, win %3, flags %5, cwnd %6)"
+    "Sent %6 bytes (seq %1, ack %2, win %5, flags %3) in state %8 cwnd %7"
 EVENT ACK  102  VERBOSE  RX,CC  ACK
     "Acknowledged %1 bytes to %2 (%3 in flight, %4 sacked, %5 segments, rcv_time %6 us)"
 EVENT SACK  103  VERBOSE  RX,CC  SACK

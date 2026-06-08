@@ -2267,16 +2267,17 @@ bbr_log_ack_event(struct tcp_bbr *bbr, struct tcphdr *th, struct tcpopt *to, uin
 		    tlen, &log, true, &bbr->rc_tv);
 	}
 	TCP_EVENTLOG_IN_LOG(bbr->rc_tp->t_eventlog_session,
-	    ntohl(th->th_seq),
-	    ntohl(th->th_ack),
-	    (uint32_t)ntohs(th->th_win) << bbr->rc_tp->snd_scale,
+	    th->th_seq,
+	    th->th_ack,
+	    tcp_get_flags(th),
+	    th->th_win,
+	    (uint32_t)th->th_win << bbr->rc_tp->snd_scale,
 	    tlen,
-	    th->th_flags,
 	    bbr->rc_tp->t_state,
 	    th->th_off,
 	    ntohs(th->th_sum),
-	    ntohs(th->th_urp),
-	    timeval_to_usec64(&bbr->rc_tv));
+	    th->th_urp,
+	    tcp_tv_to_lusec(&bbr->rc_tv));
 }
 
 static void
@@ -13521,10 +13522,12 @@ send:
 	TCP_EVENTLOG_OUT_LOG(tp->t_eventlog_session,
 	    ntohl(th->th_seq),
 	    ntohl(th->th_ack),
+	    tcp_get_flags(th),
 	    ntohs(th->th_win),
+	    (uint32_t)ntohs(th->th_win) << tp->rcv_scale,
 	    len,
-	    th->th_flags,
 	    tp->snd_cwnd,
+	    tp->t_state,
 	    th->th_off,
 	    ntohs(th->th_sum),
 	    ntohs(th->th_urp));

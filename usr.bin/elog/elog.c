@@ -390,9 +390,9 @@ get_session_output_file(const char *session_id)
 	if (j == 0)
 		snprintf(sanitized, sizeof(sanitized), "global");
 
-	sf = malloc(sizeof(*sf));
+	sf = calloc(1, sizeof(*sf));
 	if (sf == NULL)
-		err(1, "malloc(session_file)");
+		err(1, "calloc(session_file)");
 	sf->session_id = strdup(session_id);
 	if (sf->session_id == NULL)
 		err(1, "strdup");
@@ -405,9 +405,6 @@ get_session_output_file(const char *session_id)
 	sf->fp = fopen(fullpath, "wb");
 	if (sf->fp == NULL)
 		err(1, "fopen(%s)", fullpath);
-	sf->header_written = false;
-	sf->capture_start = 0;
-	sf->event_count = 0;
 	STAILQ_INSERT_TAIL(&session_files, sf, link);
 	return (sf->fp);
 }

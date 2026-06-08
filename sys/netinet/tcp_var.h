@@ -859,7 +859,7 @@ tcp_packets_this_ack(struct tcpcb *tp, tcp_seq ack)
 #define	TF2_PROC_SACK_PROHIBIT	0x00100000 /* Due to small MSS size do not process sack's */
 #define	TF2_IPSEC_TSO		0x00200000 /* IPSEC + TSO supported */
 #define	TF2_NO_ISS_CHECK	0x00400000 /* Don't check SEG.ACK against ISS */
-#define	TF2_EVENTLOG_ENABLED	0x00800000 /* User requested eventlog enabled */
+#define	TF2_EVENTLOG_ENABLED	0x02000000 /* User requested eventlog enabled */
 
 /* t_flags2 description for use with printf(9) %b identifier. */
 #define	TF2_BITS	"\20" \
@@ -874,7 +874,7 @@ tcp_packets_this_ack(struct tcpcb *tp, tcp_seq ack)
     "\21TF2_SUPPORTS_MBUFQ\22TF2_MBUF_QUEUE_READY" \
     "\23TF2_DONT_SACK_QUEUE\24TF2_CANNOT_DO_ECN" \
     "\25TF2_PROC_SACK_PROHIBIT\26TF2_IPSEC_TSO" \
-    "\27TF2_NO_ISS_CHECK\30TF2_EVENTLOG_ENABLED"
+    "\27TF2_NO_ISS_CHECK\32TF2_EVENTLOG_ENABLED"
 
 /*
  * Structure to hold TCP options that are only used during segment
