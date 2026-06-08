@@ -1020,6 +1020,17 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	}
 #endif
 	/*
+	 * Inherit eventlog enable state from the listener so that connections
+	 * accepted on an eventlog-enabled listener are themselves observed.
+	 * Enable the connection's session and dump its current state so
+	 * subscribers see a complete view from the start.
+	 */
+	if ((sototcpcb(lso)->t_flags2 & TF2_EVENTLOG_ENABLED) != 0) {
+		tp->t_flags2 |= TF2_EVENTLOG_ENABLED;
+		eventlog_session_set_enabled(tp->t_eventlog_session, 1);
+		tcp_eventlog_dump_session(tp, tcp_log_id_str(tp));
+	}
+	/*
 	 * Copy and activate timers.
 	 */
 	tp->t_maxunacktime = sototcpcb(lso)->t_maxunacktime;
