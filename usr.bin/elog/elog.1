@@ -191,14 +191,68 @@ Multiple provider subscriptions can be specified by using multiple
 flags.
 .Pp
 The utility reads events continuously, blocking when no data is available.
-Events are displayed with timestamp, CPU, thread ID, provider name, session ID,
-and formatted event data.
+Each formatted event is written as a single line to standard output in the
+form:
+.Bd -literal -offset indent
+[CPU]TID::TIMESTAMP [PROVIDER][SESSION_ID][EVENT_NAME] PAYLOAD
+.Ed
+.Pp
+where
+.Bl -tag -width 12n -compact
+.It Va CPU
+the CPU number that emitted the event, formatted as a 2-character right-aligned
+decimal field
+.Pq e.g. Li \&[47] .
+The field grows wider when needed; this is a minimum, not a fixed width.
+.It Va TID
+the thread id of the emitting context, formatted as at least 4 lowercase hex
+digits.
+The field grows wider when needed; this is a minimum, not a fixed width.
+.It Va TIMESTAMP
+the in-kernel emit time
+.Pq see Xr eventlog 9 ,
+formatted as
+.Li HH:MM:SS.uuuuuu
+or
+.Li YYYY-MM-DD HH:MM:SS.uuuuuu
+when
+.Fl d
+is given.
+.It Va PROVIDER
+the provider name as registered by
+.Xr eventlog 9
+.Po e.g.\&
+.Li tcp ,
+.Li hpts
+.Pc .
+.It Va SESSION_ID
+the per-provider session identifier as a decimal number
+.Pq e.g.\& a TCP per-connection inp_gencnt .
+.It Va EVENT_NAME
+.Pq optional, requires Fl e
+the event symbolic name (e.g.,
+.Li IN ,
+.Li OUT ,
+.Li SESSION_CREATE )
+in square brackets.
+Unknown event ids are printed as
+.Li \&[?<id>] .
+.It Va PAYLOAD
+provider-specific decoded fields, as
+.Li name=value
+pairs separated by spaces.
+.El
+.Pp
 When
 .Fl n , Fl t ,
 or
 .Fl -delta-time
 are enabled, their respective prefixes appear at the beginning of each line
-before the CPU and thread fields.
+before the
+.Va CPU
+and
+.Va TID
+fields.
 .Pp
 Statistics are only printed when the
 .Fl s

@@ -442,8 +442,7 @@ close_session_file(const char *session_id)
 {
 	struct session_file *sf, *sf_next;
 
-	for (sf = STAILQ_FIRST(&session_files); sf != NULL; sf = sf_next) {
-		sf_next = STAILQ_NEXT(sf, link);
+	STAILQ_FOREACH_SAFE(sf, &session_files, link, sf_next) {
 		if (strcmp(sf->session_id, session_id) == 0) {
 			if (sf->header_written)
 				rewrite_binary_header(sf->fp, sf->capture_start,
