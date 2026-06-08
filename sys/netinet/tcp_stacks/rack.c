@@ -5431,7 +5431,7 @@ rack_ack_received(struct tcpcb *tp, struct tcp_rack *rack, uint32_t th_ack, uint
 	    acked, th_ack,
 	    ctf_flight_size(rack->rc_tp, rack->r_ctl.rc_sacked),
 	    rack->r_ctl.rc_sacked, nsegs,
-	    timeval_to_usec64(&rack->r_ctl.act_rcv_time));
+	    tcp_tv_to_lusec(&rack->r_ctl.act_rcv_time));
 	if (lgb) {
 		lgb->tlb_stackinfo.u_bbr.flex6 = tp->snd_cwnd;
 	}

@@ -107,6 +107,7 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <netinet/tcp_hpts.h>
 #include <eventlog/tcp_eventlog.h>
 #include <netinet6/tcp6_var.h>
 #include <netinet/tcpip.h>
@@ -1512,19 +1513,18 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 	KASSERT(tp->t_state != TCPS_TIME_WAIT, ("%s: TCPS_TIME_WAIT",
 	    __func__));
 
-	tiwin = th->th_win << tp->snd_scale;
-
 	TCP_LOG_EVENT(tp, th, &so->so_rcv, &so->so_snd, TCP_LOG_IN, 0,
 	    tlen, NULL, true);
 	TCP_EVENTLOG_IN_LOG(tp->t_eventlog_session,
-	    ntohl(th->th_seq),
-	    ntohl(th->th_ack),
-	    tiwin,
-	    tlen,
+	    th->th_seq,
+	    th->th_ack,
 	    thflags,
+	    th->th_win,
+	    (uint32_t)th->th_win << tp->snd_scale,
+	    tlen,
 	    tp->t_state,
 	    th->th_off,
-	    th->th_sum,
+	    ntohs(th->th_sum),
 	    th->th_urp,
 	    tcp_get_u64_usecs(NULL));
 

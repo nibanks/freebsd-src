@@ -1430,13 +1430,15 @@ send:
 	TCP_EVENTLOG_OUT_LOG(tp->t_eventlog_session,
 	    ntohl(th->th_seq),
 	    ntohl(th->th_ack),
+	    tcp_get_flags(th),
 	    ntohs(th->th_win),
+	    (uint32_t)ntohs(th->th_win) << tp->rcv_scale,
 	    len,
-	    th->th_flags,
 	    tp->snd_cwnd,
+	    tp->t_state,
 	    th->th_off,
-	    th->th_sum,
-	    th->th_urp);
+	    ntohs(th->th_sum),
+	    ntohs(th->th_urp));
 
 	/*
 	 * Fill in IP length and desired time to live and

@@ -1020,6 +1020,13 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	}
 #endif
 	/*
+	 * Inherit eventlog enable state from the listener so that connections
+	 * accepted on an eventlog-enabled listener are themselves observed.
+	 * The per-connection session is created lazily on first emit.
+	 */
+	if ((sototcpcb(lso)->t_flags2 & TF2_EVENTLOG_ENABLED) != 0)
+		tp->t_flags2 |= TF2_EVENTLOG_ENABLED;
+	/*
 	 * Copy and activate timers.
 	 */
 	tp->t_maxunacktime = sototcpcb(lso)->t_maxunacktime;
