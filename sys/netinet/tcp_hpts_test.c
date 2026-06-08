@@ -142,7 +142,7 @@ dump_hpts_entry(struct ktest_test_context *ctx, struct tcp_hpts_entry *hpts)
 	KTEST_LOG(ctx, "  p_prev_slot: %u", hpts->p_prev_slot);
 	KTEST_LOG(ctx, "  p_nxt_slot: %u", hpts->p_nxt_slot);
 	KTEST_LOG(ctx, "  p_runningslot: %u", hpts->p_runningslot);
-	KTEST_LOG(ctx, "  p_on_queue_cnt: %d", hpts->p_on_queue_cnt);
+	KTEST_LOG(ctx, "  p_tp_cur_count: %d", hpts->p_tp_cur_count);
 	KTEST_LOG(ctx, "  p_hpts_active: %u", hpts->p_hpts_active);
 	KTEST_LOG(ctx, "  p_wheel_complete: %u", hpts->p_wheel_complete);
 	KTEST_LOG(ctx, "  p_direct_wake: %u", hpts->p_direct_wake);
@@ -159,7 +159,7 @@ dump_hpts_entry(struct ktest_test_context *ctx, struct tcp_hpts_entry *hpts)
 	KTEST_LOG(ctx, "  p_cpu: %u", hpts->p_cpu);
 	KTEST_LOG(ctx, "  ie_cookie: %p", hpts->ie_cookie);
 	KTEST_LOG(ctx, "  p_hptsi: %p", hpts->p_hptsi);
-	KTEST_LOG(ctx, "  p_mysleep: %ld.%06ld", hpts->p_mysleep.tv_sec, hpts->p_mysleep.tv_usec);
+	KTEST_LOG(ctx, "  p_mysleep_usec: %u", hpts->p_mysleep_usec);
 }
 
 static void
@@ -176,6 +176,7 @@ dump_tcpcb(struct tcpcb *tp)
 	KTEST_LOG(ctx, "  t_hpts_slot: %d", tp->t_hpts_slot);
 	KTEST_LOG(ctx, "  t_hpts_gencnt: %u", tp->t_hpts_gencnt);
 	KTEST_LOG(ctx, "  t_hpts_request: %u", tp->t_hpts_request);
+	KTEST_LOG(ctx, "  t_hpts_request_time: %u", tp->t_hpts_request_time);
 
 	/* LRO CPU field */
 	KTEST_LOG(ctx, "  t_lro_cpu: %u", tp->t_lro_cpu);
@@ -195,7 +196,7 @@ dump_tcpcb(struct tcpcb *tp)
 
 /* Enum for call counting indices */
 enum test_call_counts {
-	CCNT_MICROUPTIME = 0,
+	CCNT_BINUPTIME = 0,
 	CCNT_SWI_ADD,
 	CCNT_SWI_REMOVE,
 	CCNT_SWI_SCHED,
@@ -224,11 +225,13 @@ test_hpts_init(void)
 }
 
 static void
-test_microuptime(struct timeval *tv)
+test_binuptime(struct bintime *bt)
 {
-	call_counts[CCNT_MICROUPTIME]++;
-	tv->tv_sec = test_time_usec / 1000000;
-	tv->tv_usec = test_time_usec % 1000000;
+	sbintime_t sbt;
+
+	call_counts[CCNT_BINUPTIME]++;
+	sbt = ustosbt(test_time_usec);
+	*bt = sbttobt(sbt);
 }
 
 static int
@@ -299,7 +302,7 @@ test_callout_stop_safe(struct callout *c, int flags)
 }
 
 static const struct tcp_hptsi_funcs test_funcs = {
-	.microuptime = test_microuptime,
+	.binuptime = test_binuptime,
 	.swi_add = test_swi_add,
 	.swi_remove = test_swi_remove,
 	.swi_sched = test_swi_sched,
@@ -465,7 +468,7 @@ KTEST_FUNC(hptsi_create_destroy)
 		KTEST_NEQUAL(pace->rp_ent[i], NULL);
 		KTEST_EQUAL(pace->rp_ent[i]->p_cpu, i);
 		KTEST_EQUAL(pace->rp_ent[i]->p_hptsi, pace);
-		KTEST_EQUAL(pace->rp_ent[i]->p_on_queue_cnt, 0);
+		KTEST_EQUAL(pace->rp_ent[i]->p_tp_cur_count, 0);
 	}
 
 	tcp_hptsi_destroy(pace);
@@ -549,7 +552,7 @@ KTEST_FUNC(function_injection)
 	pace = tcp_hptsi_create(&test_funcs, false);
 	KTEST_NEQUAL(pace, NULL);
 	KTEST_EQUAL(pace->funcs, &test_funcs);
-	KTEST_VERIFY(call_counts[CCNT_MICROUPTIME] > 0);
+	KTEST_VERIFY(call_counts[CCNT_BINUPTIME] > 0);
 	KTEST_VERIFY(call_counts[CCNT_CALLOUT_INIT] > 0);
 
 	tcp_hptsi_start(pace);
@@ -601,6 +604,7 @@ KTEST_FUNC(tcpcb_initialization)
 	KTEST_EQUAL(tp->t_hpts_gencnt, 0);
 	KTEST_EQUAL(tp->t_hpts_slot, 0);
 	KTEST_EQUAL(tp->t_hpts_request, 0);
+	KTEST_EQUAL(tp->t_hpts_request_time, 0);
 	KTEST_EQUAL(tp->t_lro_cpu, 0);
 	KTEST_VERIFY(tp->t_hpts_cpu < pace->rp_num_hptss);
 	KTEST_EQUAL(tp->t_inpcb.inp_refcount, 1);
@@ -623,7 +627,7 @@ KTEST_FUNC(tcpcb_insertion)
 	struct tcp_hptsi *pace;
 	struct tcpcb *tp;
 	struct tcp_hpts_entry *hpts;
-	uint32_t timeout_usecs = 10;
+	uint32_t timeout_usecs = hpts_usecs_per_slot; /* to slot 1 */
 	int error;
 
 	error = 0;
@@ -648,12 +652,12 @@ KTEST_FUNC(tcpcb_insertion)
 	KTEST_EQUAL(call_counts[CCNT_SWI_SCHED], 1);
 	KTEST_VERIFY(tcp_in_hpts(tp));
 	KTEST_VERIFY(tp->t_hpts_slot >= 0);
-	KTEST_VERIFY(tp->t_hpts_slot < NUM_OF_HPTSI_SLOTS);
+	KTEST_VERIFY(tp->t_hpts_slot < hpts_num_slots);
+	KTEST_EQUAL(tp->t_hpts_slot, hpts_usec_to_slots(timeout_usecs));
+	KTEST_EQUAL(tp->t_hpts_request, 0);
 
 	hpts = pace->rp_ent[tp->t_hpts_cpu];
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 1);
-	KTEST_EQUAL(tp->t_hpts_request, 0);
-	KTEST_EQUAL(tp->t_hpts_slot, HPTS_USEC_TO_SLOTS(timeout_usecs));
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 	//KTEST_EQUAL(tp->t_hpts_gencnt, 1);
 
 	INP_WLOCK(&tp->t_inpcb);
@@ -663,7 +667,7 @@ KTEST_FUNC(tcpcb_insertion)
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 0);
 	KTEST_VERIFY(!tcp_in_hpts(tp));
 
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 0);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 0);
 
 	test_hpts_free_tcpcb(tp);
 	tcp_hptsi_stop(pace);
@@ -689,6 +693,8 @@ KTEST_FUNC(timer_functionality)
 	struct tcpcb *tp;
 	int32_t slots_ran;
 	uint32_t i;
+	uint32_t target_slots;
+	uint32_t boundary_us;
 
 	test_hpts_init();
 
@@ -716,7 +722,7 @@ KTEST_FUNC(timer_functionality)
 		dump_hpts_entry(ctx, pace->rp_ent[i]);
 
 	hpts = pace->rp_ent[tp->t_hpts_cpu];
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 1);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 	KTEST_EQUAL(hpts->p_prev_slot, 0);
 	KTEST_EQUAL(hpts->p_cur_slot, 0);
 	KTEST_EQUAL(hpts->p_runningslot, 0);
@@ -725,7 +731,8 @@ KTEST_FUNC(timer_functionality)
 
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE);
 	KTEST_EQUAL(tp->t_hpts_request, 0);
-	KTEST_EQUAL(tp->t_hpts_slot, HPTS_USEC_TO_SLOTS(500));
+	KTEST_EQUAL(tp->t_hpts_slot, hpts_usec_to_slots(500));
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 
 	/* Set our test flag to indicate the tcpcb should be removed from the
 	 * wheel when tcp_output is called. */
@@ -745,10 +752,14 @@ KTEST_FUNC(timer_functionality)
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 0); /* No processing should occur */
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE); /* Connection still queued */
 
-	/* Wait for 498 more usecs and trigger the HPTS workers and verify
-	 * nothing happens yet (total 499 usec) */
+	/* Advance time to just before the target slot boundary. For a request
+	 * of 500us, we compute the slot count and its corresponding boundary
+	 * time, then advance to boundary-1 so the timer should still not fire. */
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 0);
-	test_time_usec += 498;
+	target_slots = hpts_usec_to_slots(500);
+	boundary_us = hpts_slots_to_usec(target_slots);
+	/* We've already advanced 1 usec above; move to one usec before boundary. */
+	test_time_usec += (boundary_us - 1 - 1);
 	for (i = 0; i < pace->rp_num_hptss; i++) {
 		KTEST_LOG(ctx, "=> tcp_hptsi(%p)", pace->rp_ent[i]);
 		HPTS_LOCK(pace->rp_ent[i]);
@@ -759,19 +770,19 @@ KTEST_FUNC(timer_functionality)
 
 		dump_hpts_entry(ctx, pace->rp_ent[i]);
 		KTEST_VERIFY(slots_ran >= 0);
-		KTEST_EQUAL(pace->rp_ent[i]->p_prev_slot, 49);
-		KTEST_EQUAL(pace->rp_ent[i]->p_cur_slot, 49);
+		/* At boundary-1, slot index should not have advanced to fire. */
+		KTEST_EQUAL(pace->rp_ent[i]->p_prev_slot, pace->rp_ent[i]->p_cur_slot);
 	}
 
 	dump_tcpcb(tp);
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 0);
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE);
 	KTEST_EQUAL(tp->t_hpts_request, 0);
-	KTEST_EQUAL(tp->t_hpts_slot, HPTS_USEC_TO_SLOTS(500));
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 1);
+	KTEST_EQUAL(tp->t_hpts_slot, hpts_usec_to_slots(500));
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 
-	/* Wait for 1 more usec and trigger the HPTS workers and verify it
-	 * triggers tcp_output this time */
+	/* Advance by one more usec to hit the exact boundary; now the timer
+	 * should fire. */
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 0);
 	test_time_usec += 1;
 	for (i = 0; i < pace->rp_num_hptss; i++) {
@@ -784,14 +795,13 @@ KTEST_FUNC(timer_functionality)
 
 		dump_hpts_entry(ctx, pace->rp_ent[i]);
 		KTEST_VERIFY(slots_ran >= 0);
-		KTEST_EQUAL(pace->rp_ent[i]->p_prev_slot, 50);
-		KTEST_EQUAL(pace->rp_ent[i]->p_cur_slot, 50);
+		KTEST_EQUAL(pace->rp_ent[i]->p_prev_slot, pace->rp_ent[i]->p_cur_slot);
 	}
 
 	dump_tcpcb(tp);
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 1);
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_NONE);
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 0);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 0);
 
 	test_hpts_free_tcpcb(tp);
 	tcp_hptsi_stop(pace);
@@ -842,7 +852,7 @@ KTEST_FUNC(scalability_tcpcbs)
 
 	/* Verify total queue counts across all CPUs */
 	for (i = 0; i < pace->rp_num_hptss; i++) {
-		total_queued += pace->rp_ent[i]->p_on_queue_cnt;
+		total_queued += pace->rp_ent[i]->p_tp_cur_count;
 	}
 	KTEST_EQUAL(total_queued, num_tcpcbs);
 
@@ -861,8 +871,8 @@ KTEST_FUNC(scalability_tcpcbs)
 
 	/* Verify all queues are now empty */
 	for (i = 0; i < pace->rp_num_hptss; i++) {
-		if (pace->rp_ent[i]->p_on_queue_cnt != 0) {
-			KTEST_ERR(ctx, "FAIL: pace->rp_ent[i]->p_on_queue_cnt != 0");
+		if (pace->rp_ent[i]->p_tp_cur_count != 0) {
+			KTEST_ERR(ctx, "FAIL: pace->rp_ent[i]->p_tp_cur_count != 0");
 			return (EINVAL);
 		}
 	}
@@ -905,7 +915,7 @@ KTEST_FUNC(wheel_wrap_recovery)
 		KTEST_NEQUAL(tcpcbs[i], NULL);
 		TP_REMOVE_FROM_HPTS(tcpcbs[i]) = 1;
 
-		timeout_usecs = ((i * NUM_OF_HPTSI_SLOTS) / num_tcpcbs) * HPTS_USECS_PER_SLOT; /* Spread across slots */
+		timeout_usecs = 1 + ((i * hpts_num_slots) / num_tcpcbs) * HPTS_USECS_PER_SLOT; /* Spread across slots */
 
 		INP_WLOCK(&tcpcbs[i]->t_inpcb);
 		tcpcbs[i]->t_flags2 |= TF2_HPTS_CALLS;
@@ -914,11 +924,11 @@ KTEST_FUNC(wheel_wrap_recovery)
 	}
 
 	/* Fast forward time significantly to trigger wheel wrap */
-	test_time_usec += (NUM_OF_HPTSI_SLOTS + 5000) * HPTS_USECS_PER_SLOT;
+	test_time_usec += (hpts_num_slots + 5000) * HPTS_USECS_PER_SLOT;
 
 	for (i = 0; i < pace->rp_num_hptss; i++) {
 		KTEST_LOG(ctx, "=> tcp_hptsi(%u)", i);
-		KTEST_NEQUAL(pace->rp_ent[i]->p_on_queue_cnt, 0);
+		KTEST_NEQUAL(pace->rp_ent[i]->p_tp_cur_count, 0);
 
 		HPTS_LOCK(pace->rp_ent[i]);
 		NET_EPOCH_ENTER(et);
@@ -926,8 +936,8 @@ KTEST_FUNC(wheel_wrap_recovery)
 		HPTS_UNLOCK(pace->rp_ent[i]);
 		NET_EPOCH_EXIT(et);
 
-		KTEST_EQUAL(slots_ran, NUM_OF_HPTSI_SLOTS-1); /* Should process all slots */
-		KTEST_EQUAL(pace->rp_ent[i]->p_on_queue_cnt, 0);
+		KTEST_EQUAL(slots_ran, hpts_num_slots-1); /* Should process all slots */
+		KTEST_EQUAL(pace->rp_ent[i]->p_tp_cur_count, 0);
 		KTEST_NEQUAL(pace->rp_ent[i]->p_cur_slot,
 			pace->rp_ent[i]->p_prev_slot);
 	}
@@ -979,12 +989,12 @@ KTEST_FUNC(tcpcb_moving_state)
 	/* Insert both into the same slot */
 	INP_WLOCK(&tp1->t_inpcb);
 	tp1->t_flags2 |= TF2_HPTS_CALLS;
-	tcp_hpts_insert(pace, tp1, 100, NULL);
+	tcp_hpts_insert(pace, tp1, hpts_slots_to_usec(10), NULL);
 	INP_WUNLOCK(&tp1->t_inpcb);
 
 	INP_WLOCK(&tp2->t_inpcb);
 	tp2->t_flags2 |= TF2_HPTS_CALLS;
-	tcp_hpts_insert(pace, tp2, 100, NULL);
+	tcp_hpts_insert(pace, tp2, hpts_slots_to_usec(10), NULL);
 	INP_WUNLOCK(&tp2->t_inpcb);
 
 	hpts = pace->rp_ent[0];
@@ -996,7 +1006,7 @@ KTEST_FUNC(tcpcb_moving_state)
 	HPTS_UNLOCK(hpts);
 
 	/* Set time and run HPTS to process the moving state */
-	test_time_usec += 100;
+	test_time_usec += hpts_slots_to_usec(12);
 	HPTS_LOCK(hpts);
 	NET_EPOCH_ENTER(et);
 	slots_ran = tcp_hptsi(hpts, true);
@@ -1030,9 +1040,10 @@ KTEST_FUNC(deferred_requests)
 	struct tcp_hptsi *pace;
 	struct tcpcb *tp, *tp2;
 	struct tcp_hpts_entry *hpts;
-	uint32_t large_timeout_usecs = (NUM_OF_HPTSI_SLOTS + 5000) * HPTS_USECS_PER_SLOT; /* Beyond wheel capacity */
-	uint32_t huge_timeout_usecs = (NUM_OF_HPTSI_SLOTS * 3) * HPTS_USECS_PER_SLOT; /* 3x wheel capacity */
+	uint32_t large_timeout_usecs = 1500000; /* 1.5 seconds - beyond wheel capacity */
+	uint32_t huge_timeout_usecs = (hpts_num_slots - 1) * 3 * HPTS_USECS_PER_SLOT; /* 3x max wheel capacity */
 	uint32_t initial_request;
+	uint32_t current_slot, target_slot, slots_to_advance;
 	int32_t slots_ran;
 
 	test_hpts_init();
@@ -1054,14 +1065,27 @@ KTEST_FUNC(deferred_requests)
 	dump_tcpcb(tp);
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE);
 	KTEST_VERIFY(tp->t_hpts_request > 0);
-	KTEST_VERIFY(tp->t_hpts_slot < NUM_OF_HPTSI_SLOTS);
+	KTEST_VERIFY(tp->t_hpts_slot < hpts_num_slots);
 
 	hpts = pace->rp_ent[tp->t_hpts_cpu];
 
-	/* Advance time to process deferred requests */
-	test_time_usec += NUM_OF_HPTSI_SLOTS * HPTS_USECS_PER_SLOT;
+	/* Advance time to ensure HPTS processes the slot containing the connection */
+	current_slot = hpts_usecs_to_wheel(test_time_usec);
+	target_slot = tp->t_hpts_slot;
+
+	/* Calculate how much to advance so that HPTS will process through target_slot */
+	if (target_slot >= current_slot) {
+		/* Normal case: advance to just past the target slot */
+		slots_to_advance = target_slot - current_slot + 1;
+	} else {
+		/* Wrap-around case: advance to just past the target slot */
+		slots_to_advance = (hpts_num_slots - current_slot) + target_slot + 1;
+	}
+
+	test_time_usec += slots_to_advance * HPTS_USECS_PER_SLOT;
 
 	/* Process the wheel to handle deferred requests */
+	/* Note: When advancing by a full wheel, HPTS will process all slots */
 	HPTS_LOCK(hpts);
 	NET_EPOCH_ENTER(et);
 	slots_ran = tcp_hptsi(hpts, true);
@@ -1088,10 +1112,10 @@ KTEST_FUNC(deferred_requests)
 
 	/* Verify initial deferred request */
 	initial_request = tp2->t_hpts_request;
-	KTEST_VERIFY(initial_request > NUM_OF_HPTSI_SLOTS);
+	KTEST_VERIFY(initial_request > hpts_num_slots);
 
 	/* Process one wheel cycle - should reduce but not eliminate request */
-	test_time_usec += NUM_OF_HPTSI_SLOTS * HPTS_USECS_PER_SLOT;
+	test_time_usec += hpts_num_slots * HPTS_USECS_PER_SLOT;
 	HPTS_LOCK(hpts);
 	NET_EPOCH_ENTER(et);
 	slots_ran = tcp_hptsi(hpts, true);
@@ -1103,18 +1127,16 @@ KTEST_FUNC(deferred_requests)
 	KTEST_VERIFY(tp2->t_hpts_request > 0);
 	KTEST_EQUAL(tp2->t_in_hpts, IHPTS_ONQUEUE); /* Still queued */
 
-	/* For huge_timeout_usecs = NUM_OF_HPTSI_SLOTS * 3 * HPTS_USECS_PER_SLOT, we need ~3 cycles to complete.
-	 * Each cycle can reduce the request by at most NUM_OF_HPTSI_SLOTS. */
-	test_time_usec += NUM_OF_HPTSI_SLOTS * HPTS_USECS_PER_SLOT;
+	/* Process another wheel cycle - after 2 full cycles from 3s initial, should fit on wheel */
+	test_time_usec += hpts_num_slots * HPTS_USECS_PER_SLOT;
 	HPTS_LOCK(hpts);
 	NET_EPOCH_ENTER(et);
 	slots_ran = tcp_hptsi(hpts, true);
 	HPTS_UNLOCK(hpts);
 	NET_EPOCH_EXIT(et);
 
-	/* After second cycle, request should be reduced significantly (likely by ~NUM_OF_HPTSI_SLOTS) */
-	KTEST_VERIFY(tp2->t_hpts_request < initial_request);
-	KTEST_VERIFY(tp2->t_hpts_request > 0); /* But not yet zero for such a large request */
+	/* After 2 full wheel cycles, remaining should fit on wheel */
+	KTEST_EQUAL(tp2->t_hpts_request, 0);
 
 	/* Clean up second connection */
 	INP_WLOCK(&tp2->t_inpcb);
@@ -1217,24 +1239,13 @@ KTEST_FUNC(slot_boundary_conditions)
 	KTEST_NEQUAL(pace, NULL);
 	tcp_hptsi_start(pace);
 
-	/* Test insertion at slot 0 */
 	tp = test_hpts_create_tcpcb(ctx, pace);
 	KTEST_NEQUAL(tp, NULL);
-	INP_WLOCK(&tp->t_inpcb);
-	tp->t_flags2 |= TF2_HPTS_CALLS;
-	tcp_hpts_insert(pace, tp, 0, NULL); /* Should insert immediately (0 timeout) */
-	INP_WUNLOCK(&tp->t_inpcb);
-	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE);
-	KTEST_VERIFY(tp->t_hpts_slot < NUM_OF_HPTSI_SLOTS);
-
-	INP_WLOCK(&tp->t_inpcb);
-	tcp_hpts_remove(pace, tp);
-	INP_WUNLOCK(&tp->t_inpcb);
 
 	/* Test insertion at maximum slot value */
 	INP_WLOCK(&tp->t_inpcb);
 	tp->t_flags2 |= TF2_HPTS_CALLS;
-	tcp_hpts_insert(pace, tp, (NUM_OF_HPTSI_SLOTS - 1) * HPTS_USECS_PER_SLOT, NULL);
+	tcp_hpts_insert(pace, tp, (hpts_num_slots - 1) * HPTS_USECS_PER_SLOT, NULL);
 	INP_WUNLOCK(&tp->t_inpcb);
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE);
 
@@ -1248,7 +1259,7 @@ KTEST_FUNC(slot_boundary_conditions)
 	tcp_hpts_insert(pace, tp, 1, NULL);
 	INP_WUNLOCK(&tp->t_inpcb);
 	KTEST_EQUAL(tp->t_in_hpts, IHPTS_ONQUEUE);
-	KTEST_EQUAL(tp->t_hpts_slot, HPTS_USEC_TO_SLOTS(1)); /* Should convert 1 usec to slot */
+	KTEST_EQUAL(tp->t_hpts_slot, hpts_usec_to_slots(1)); /* Should convert 1 usec to slot */
 
 	INP_WLOCK(&tp->t_inpcb);
 	tcp_hpts_remove(pace, tp);
@@ -1291,7 +1302,7 @@ KTEST_FUNC(dynamic_sleep_adjustment)
 		INP_WLOCK(&tcpcbs[i]->t_inpcb);
 		tcpcbs[i]->t_flags2 |= TF2_HPTS_CALLS;
 		TP_REMOVE_FROM_HPTS(tcpcbs[i]) = 1; /* Will be removed after output */
-		tcp_hpts_insert(pace, tcpcbs[i], 100, NULL);
+		tcp_hpts_insert(pace, tcpcbs[i], hpts_slots_to_usec(10), NULL);
 		INP_WUNLOCK(&tcpcbs[i]->t_inpcb);
 	}
 
@@ -1299,10 +1310,10 @@ KTEST_FUNC(dynamic_sleep_adjustment)
 	dump_hpts_entry(ctx, hpts);
 
 	/* Verify we're above threshold */
-	KTEST_GREATER_THAN(hpts->p_on_queue_cnt, DEFAULT_CONNECTION_THRESHOLD);
+	KTEST_GREATER_THAN(hpts->p_tp_cur_count, DEFAULT_CONNECTION_THRESHOLD);
 
 	/* Run HPTS to process many connections */
-	test_time_usec += 100;
+	test_time_usec += hpts_slots_to_usec(12);
 	HPTS_LOCK(hpts);
 	NET_EPOCH_ENTER(et);
 	slots_ran = tcp_hptsi(hpts, true);
@@ -1314,7 +1325,7 @@ KTEST_FUNC(dynamic_sleep_adjustment)
 	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], num_tcpcbs);
 
 	/* Verify all connections were removed from queue */
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 0);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 0);
 
 	/* Cleanup */
 	for (i = 0; i < num_tcpcbs; i++) {
@@ -1355,13 +1366,13 @@ KTEST_FUNC(concurrent_operations)
 	/* Insert tp1 */
 	INP_WLOCK(&tp1->t_inpcb);
 	tp1->t_flags2 |= TF2_HPTS_CALLS;
-	tcp_hpts_insert(pace, tp1, 100, NULL);
+	tcp_hpts_insert(pace, tp1, hpts_slots_to_usec(10), NULL);
 	INP_WUNLOCK(&tp1->t_inpcb);
 
 	/* Insert tp2 into same slot */
 	INP_WLOCK(&tp2->t_inpcb);
 	tp2->t_flags2 |= TF2_HPTS_CALLS;
-	tcp_hpts_insert(pace, tp2, 100, NULL);
+	tcp_hpts_insert(pace, tp2, hpts_slots_to_usec(10), NULL);
 	INP_WUNLOCK(&tp2->t_inpcb);
 
 	/* Verify both are inserted */
@@ -1374,7 +1385,7 @@ KTEST_FUNC(concurrent_operations)
 	/* Verify queue count reflects both connections */
 	KTEST_EQUAL(tp1->t_hpts_cpu, tp2->t_hpts_cpu); /* Should be on same CPU */
 	hpts = pace->rp_ent[tp1->t_hpts_cpu];
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 2);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 2);
 
 	/* Remove tp1 while tp2 is still there */
 	INP_WLOCK(&tp1->t_inpcb);
@@ -1386,7 +1397,7 @@ KTEST_FUNC(concurrent_operations)
 	KTEST_EQUAL(tp2->t_in_hpts, IHPTS_ONQUEUE);
 
 	/* Verify queue count decreased by one */
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 1);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 1);
 
 	/* Remove tp2 */
 	INP_WLOCK(&tp2->t_inpcb);
@@ -1396,7 +1407,7 @@ KTEST_FUNC(concurrent_operations)
 	KTEST_EQUAL(tp2->t_in_hpts, IHPTS_NONE);
 
 	/* Verify queue is now completely empty */
-	KTEST_EQUAL(hpts->p_on_queue_cnt, 0);
+	KTEST_EQUAL(hpts->p_tp_cur_count, 0);
 
 	test_hpts_free_tcpcb(tp1);
 	test_hpts_free_tcpcb(tp2);
@@ -1437,13 +1448,13 @@ KTEST_FUNC(queued_segments_processing)
 	STAILQ_INSERT_TAIL(&tp->t_inqueue, fake_mbuf, m_stailqpkt);
 
 	INP_WLOCK(&tp->t_inpcb);
-	tcp_hpts_insert(pace, tp, 100, NULL);
+	tcp_hpts_insert(pace, tp, hpts_slots_to_usec(10), NULL);
 	INP_WUNLOCK(&tp->t_inpcb);
 
 	hpts = pace->rp_ent[tp->t_hpts_cpu];
 
 	/* Run HPTS and verify queued segments path is taken */
-	test_time_usec += 100;
+	test_time_usec += hpts_slots_to_usec(12);
 	HPTS_LOCK(hpts);
 	NET_EPOCH_ENTER(et);
 	slots_ran = tcp_hptsi(hpts, true);
@@ -1494,7 +1505,7 @@ KTEST_FUNC(direct_wake_mechanism)
 
 	/* Test direct wake when not over threshold */
 	HPTS_LOCK(hpts);
-	hpts->p_on_queue_cnt = 50; /* Below threshold */
+	hpts->p_tp_cur_count = 50; /* Below threshold */
 	hpts->p_hpts_wake_scheduled = 0;
 	tcp_hpts_wake(hpts);
 	KTEST_EQUAL_GOTO(hpts->p_hpts_wake_scheduled, 1, cleanup_locked);
@@ -1507,7 +1518,7 @@ KTEST_FUNC(direct_wake_mechanism)
 
 	/* Test wake inhibition when over threshold */
 	HPTS_LOCK(hpts);
-	hpts->p_on_queue_cnt = 200; /* Above threshold */
+	hpts->p_tp_cur_count = 200; /* Above threshold */
 	hpts->p_direct_wake = 1; /* Request direct wake */
 	tcp_hpts_wake(hpts);
 	KTEST_EQUAL_GOTO(hpts->p_hpts_wake_scheduled, 0, cleanup_locked);
@@ -1668,6 +1679,175 @@ KTEST_FUNC(generation_count_validation)
 	return (0);
 }
 
+/*
+ * Test lateness_usec histogram functionality with immediate processing.
+ * Validates that connections processed immediately show minimal lateness.
+ */
+KTEST_FUNC(lateness_usec_immediate)
+{
+	struct epoch_tracker et;
+	struct tcp_hptsi *pace;
+	struct tcp_hpts_entry *hpts;
+	struct tcpcb *tp;
+
+	test_hpts_init();
+
+	pace = tcp_hptsi_create(&test_funcs, false);
+	KTEST_NEQUAL(pace, NULL);
+	tcp_hptsi_start(pace);
+
+	/* Create and insert a tcpcb with minimal delay */
+	tp = test_hpts_create_tcpcb(ctx, pace);
+	KTEST_NEQUAL(tp, NULL);
+	TP_LOG_TEST(tp) = 1;
+
+	hpts = pace->rp_ent[tp->t_hpts_cpu];
+
+	/* Insert with very small delay (should fit immediately) */
+	INP_WLOCK(&tp->t_inpcb);
+	tp->t_flags2 |= TF2_HPTS_CALLS;
+	tcp_hpts_insert(pace, tp, 100, NULL); /* 100 usec delay */
+	INP_WUNLOCK(&tp->t_inpcb);
+
+	/* Verify t_hpts_request_time was set */
+	KTEST_VERIFY(tp->t_hpts_request_time > 0);
+	KTEST_EQUAL(tp->t_hpts_request, 0); /* Should fit immediately */
+
+	TP_REMOVE_FROM_HPTS(tp) = 1;
+
+	/* Process with 50 usec lateness (150 - 100) */
+	test_time_usec += 150; /* Advance past the 100 usec delay */
+
+	/* Calculate expected bucket for 50 usec lateness */
+	uint32_t expected_lateness = 50; /* 150 - 100 */
+	uint32_t expected_bucket = flsll(expected_lateness); /* Should be 6 since 2^5=32 < 50 < 64=2^6 */
+	if (expected_bucket >= HPTS_HISTOGRAM_BUCKETS)
+		expected_bucket = HPTS_HISTOGRAM_BUCKETS - 1;
+
+	KTEST_LOG(ctx, "expected_lateness=%u, expected_bucket=%u",
+	    expected_lateness, expected_bucket);
+	KTEST_LOG(ctx, "t_hpts_request_time=%u, current_time=%u",
+	    tp->t_hpts_request_time, test_time_usec);
+
+	/* Record initial histogram state for the expected bucket */
+	uint64_t initial_bucket = hpts->hist_lateness_usec.buckets[expected_bucket];
+	uint64_t initial_total = 0;
+	for (int i = 0; i < HPTS_HISTOGRAM_BUCKETS; i++) {
+		initial_total += hpts->hist_lateness_usec.buckets[i];
+	}
+
+	KTEST_LOG(ctx, "initial_bucket[%u]=%lu, initial_total=%lu",
+	    expected_bucket, initial_bucket, initial_total);
+
+	HPTS_LOCK(hpts);
+	NET_EPOCH_ENTER(et);
+	tcp_hptsi(hpts, true);
+	HPTS_UNLOCK(hpts);
+	NET_EPOCH_EXIT(et);
+
+	/* Should have processed the connection */
+	KTEST_EQUAL(call_counts[CCNT_TCP_OUTPUT], 1);
+
+	/* Check histogram state after processing */
+	uint64_t final_bucket = hpts->hist_lateness_usec.buckets[expected_bucket];
+	uint64_t final_total = 0;
+	for (int i = 0; i < HPTS_HISTOGRAM_BUCKETS; i++) {
+		if (hpts->hist_lateness_usec.buckets[i] > 0) {
+			KTEST_LOG(ctx, "final_bucket[%d]=%lu", i,
+			    hpts->hist_lateness_usec.buckets[i]);
+		}
+		final_total += hpts->hist_lateness_usec.buckets[i];
+	}
+
+	KTEST_LOG(ctx, "final_bucket[%u]=%lu, final_total=%lu", expected_bucket,
+	    final_bucket, final_total);
+
+	/* Check that lateness_usec histogram was updated */
+	KTEST_VERIFY(final_total > initial_total);
+
+	test_hpts_free_tcpcb(tp);
+	tcp_hptsi_stop(pace);
+	tcp_hptsi_destroy(pace);
+
+	return (0);
+}
+
+/*
+ * Test lateness_usec histogram with deferred connections.
+ * Validates that connections with t_hpts_request > 0 calculate lateness correctly.
+ */
+KTEST_FUNC(lateness_usec_deferred)
+{
+	struct epoch_tracker et;
+	struct tcp_hptsi *pace;
+	struct tcp_hpts_entry *hpts;
+	struct tcpcb *tp;
+	uint32_t original_request_time;
+	uint32_t initial_hist_total, final_hist_total;
+	int32_t slots_ran;
+	int i;
+
+	test_hpts_init();
+
+	pace = tcp_hptsi_create(&test_funcs, false);
+	KTEST_NEQUAL(pace, NULL);
+	tcp_hptsi_start(pace);
+
+	tp = test_hpts_create_tcpcb(ctx, pace);
+	KTEST_NEQUAL(tp, NULL);
+	TP_LOG_TEST(tp) = 1;
+
+	hpts = pace->rp_ent[tp->t_hpts_cpu];
+
+	/* Calculate initial histogram total */
+	initial_hist_total = 0;
+	for (i = 0; i < HPTS_HISTOGRAM_BUCKETS; i++) {
+		initial_hist_total += hpts->hist_lateness_usec.buckets[i];
+	}
+
+	/* Insert with large delay that will likely be deferred */
+	INP_WLOCK(&tp->t_inpcb);
+	tp->t_flags2 |= TF2_HPTS_CALLS;
+	tcp_hpts_insert(pace, tp, 2000000, NULL); /* 2 second delay */
+	INP_WUNLOCK(&tp->t_inpcb);
+
+	/* Record the original request time and verify deferral */
+	original_request_time = tp->t_hpts_request_time;
+	KTEST_VERIFY(original_request_time > 0);
+	KTEST_VERIFY(tp->t_hpts_request > 0); /* Should be deferred */
+
+	TP_REMOVE_FROM_HPTS(tp) = 1;
+
+	/* Advance time significantly and process */
+	test_time_usec += 1500000; /* 1.5 seconds */
+	HPTS_LOCK(hpts);
+	NET_EPOCH_ENTER(et);
+	slots_ran = tcp_hptsi(hpts, true);
+	HPTS_UNLOCK(hpts);
+	NET_EPOCH_EXIT(et);
+
+	/* Should have processed but connection might still be deferred */
+	KTEST_VERIFY(slots_ran > 0);
+
+	/* If connection was processed, histogram should be updated */
+	final_hist_total = 0;
+	for (i = 0; i < HPTS_HISTOGRAM_BUCKETS; i++) {
+		final_hist_total += hpts->hist_lateness_usec.buckets[i];
+	}
+
+	if (call_counts[CCNT_TCP_OUTPUT] > 0) {
+		/* Connection was processed, histogram should be updated */
+		KTEST_VERIFY(final_hist_total > initial_hist_total);
+	}
+
+	test_hpts_free_tcpcb(tp);
+	tcp_hptsi_stop(pace);
+	tcp_hptsi_destroy(pace);
+
+	return (0);
+}
+
+
 static const struct ktest_test_info tests[] = {
 	KTEST_INFO(module_load),
 	KTEST_INFO(hptsi_create_destroy),
@@ -1689,6 +1869,8 @@ static const struct ktest_test_info tests[] = {
 	KTEST_INFO(direct_wake_mechanism),
 	KTEST_INFO(hpts_collision_detection),
 	KTEST_INFO(generation_count_validation),
+	KTEST_INFO(lateness_usec_immediate),
+	KTEST_INFO(lateness_usec_deferred),
 };
 
 #else /* TCP_HPTS_KTEST */

@@ -242,7 +242,7 @@ static int32_t bbr_sub_drain_slam_cwnd = 1;
 static int32_t bbr_slam_cwnd_in_main_drain = 1;
 static int32_t bbr_filter_len_sec = 6;	/* How long does the rttProp filter
 					 * hold */
-static uint32_t bbr_rtt_probe_limit = (USECS_IN_SECOND * 4);
+static uint32_t bbr_rtt_probe_limit = (USEC_IN_SEC * 4);
 /*
  * bbr_drain_gain is the reverse of the high_gain
  * designed to drain back out the standing queue
@@ -604,8 +604,8 @@ activate_rxt:
 			else
 				tov = bbr->r_ctl.rc_min_to;
 			TCPT_RANGESET_NOSLOP(to, tov,
-			    (bbr->r_ctl.rc_min_rto_ms * MS_IN_USEC),
-			    (bbr->rc_max_rto_sec * USECS_IN_SECOND));
+			    (bbr->r_ctl.rc_min_rto_ms * USEC_IN_MSEC),
+			    (bbr->rc_max_rto_sec * USEC_IN_SEC));
 			bbr_log_timer_var(bbr, 2, cts, 0, bbr_get_rtt(bbr, BBR_SRTT), 0, to);
 			return (to);
 		}
@@ -674,7 +674,7 @@ activate_rxt:
 			to = thresh - time_since_sent;
 		else
 			to = bbr->r_ctl.rc_min_to;
-		if (to > (((uint32_t)bbr->rc_max_rto_sec) * USECS_IN_SECOND)) {
+		if (to > (((uint32_t)bbr->rc_max_rto_sec) * USEC_IN_SEC)) {
 			/*
 			 * If the TLP time works out to larger than the max
 			 * RTO lets not do TLP.. just RTO.
@@ -2170,7 +2170,7 @@ bbr_log_rtt_sample(struct tcp_bbr *bbr, uint32_t rtt, uint32_t tsin)
 		log.u_bbr.flex3 = bbr->r_ctl.rc_ack_hdwr_delay;
 		log.u_bbr.flex4 = bbr->rc_tp->ts_offset;
 		log.u_bbr.flex5 = bbr->r_ctl.rc_target_at_state;
-		log.u_bbr.pkts_out = tcp_tv_to_msec(&bbr->rc_tv);
+		log.u_bbr.pkts_out = timeval_to_msec(&bbr->rc_tv);
 		log.u_bbr.flex6 = tsin;
 		log.u_bbr.flex7 = 0;
 		log.u_bbr.flex8 = bbr->rc_ack_was_delayed;
@@ -2238,13 +2238,13 @@ bbr_log_ack_event(struct tcp_bbr *bbr, struct tcphdr *th, struct tcpopt *to, uin
 				mbuf_tstmp2timespec(m, &ts);
 				tv.tv_sec = ts.tv_sec;
 				tv.tv_usec = ts.tv_nsec / 1000;
-				log.u_bbr.lt_epoch = tcp_tv_to_usec(&tv);
+				log.u_bbr.lt_epoch = timeval_to_usec(&tv);
 			} else {
 				log.u_bbr.lt_epoch = 0;
 			}
 			if (m->m_flags & M_TSTMP_LRO) {
 				mbuf_tstmp2timeval(m, &tv);
-				log.u_bbr.flex5 = tcp_tv_to_usec(&tv);
+				log.u_bbr.flex5 = timeval_to_usec(&tv);
 			} else {
 				/* No arrival timestamp */
 				log.u_bbr.flex5 = 0;
@@ -3247,7 +3247,7 @@ reset_all:
 		bbr_log_type_ltbw(bbr, cts, 6, 0, 0, 0, d_time);
 		return;
 	}
-	if (d_time >= (0xffffffff / USECS_IN_MSEC)) {
+	if (d_time >= (0xffffffff / USEC_IN_MSEC)) {
 		/* Too long */
 		bbr_reset_lt_bw_sampling(bbr, cts);
  		/* reason 3 is to reset sampling due too long of sampling */
@@ -3256,7 +3256,7 @@ reset_all:
 	}
 	del_time = d_time;
 	bw = delivered;
-	bw *= (uint64_t)USECS_IN_SECOND;
+	bw *= (uint64_t)USEC_IN_SEC;
 	bw /= del_time;
 	bbr_lt_bw_samp_done(bbr, bw, cts, d_time);
 }
@@ -3375,7 +3375,7 @@ bbr_get_bw_delay_prod(uint64_t rtt, uint64_t bw) {
 	 */
 	uint64_t usec_per_sec;
 
-	usec_per_sec = USECS_IN_SECOND;
+	usec_per_sec = USEC_IN_SEC;
 	return ((rtt * bw) / usec_per_sec);
 }
 
@@ -3518,7 +3518,7 @@ bbr_get_pacing_length(struct tcp_bbr *bbr, uint16_t gain, uint32_t useconds_time
 	if (useconds_time == 0)
 		return (0);
 	gain = bbr_gain_adjust(bbr, gain);
-	divor = (uint64_t)USECS_IN_SECOND * (uint64_t)BBR_UNIT;
+	divor = (uint64_t)USEC_IN_SEC * (uint64_t)BBR_UNIT;
 	tim = useconds_time;
 	res = (tim * bw * gain) / divor;
 	if (res == 0)
@@ -3563,7 +3563,7 @@ bbr_get_pacing_delay(struct tcp_bbr *bbr, uint16_t gain, int32_t len, uint32_t c
 			bw = cbw;
 	}
 	lentim = ((uint64_t)len *
-		  (uint64_t)USECS_IN_SECOND *
+		  (uint64_t)USEC_IN_SEC *
 		  (uint64_t)BBR_UNIT);
 	res = lentim / ((uint64_t)gain * bw);
 	if (res == 0)
@@ -4137,8 +4137,8 @@ bbr_calc_thresh_rack(struct tcp_bbr *bbr, uint32_t srtt, uint32_t cts, struct bb
 		thresh = t_rxtcur;
 	}
 	/* And we don't want it above the RTO max either */
-	if (thresh > (((uint32_t)bbr->rc_max_rto_sec) * USECS_IN_SECOND)) {
-		thresh = (((uint32_t)bbr->rc_max_rto_sec) * USECS_IN_SECOND);
+	if (thresh > (((uint32_t)bbr->rc_max_rto_sec) * USEC_IN_SEC)) {
+		thresh = (((uint32_t)bbr->rc_max_rto_sec) * USEC_IN_SEC);
 	}
 	bbr_log_thresh_choice(bbr, cts, thresh, lro, srtt, rsm, BBR_TO_FRM_RACK);
 	return (thresh);
@@ -4206,8 +4206,8 @@ bbr_calc_thresh_tlp(struct tcpcb *tp, struct tcp_bbr *bbr,
 		thresh = t_rxtcur;
 	}
 	/* Not above a RTO max */
-	if (thresh > (((uint32_t)bbr->rc_max_rto_sec) * USECS_IN_SECOND)) {
-		thresh = (((uint32_t)bbr->rc_max_rto_sec) * USECS_IN_SECOND);
+	if (thresh > (((uint32_t)bbr->rc_max_rto_sec) * USEC_IN_SEC)) {
+		thresh = (((uint32_t)bbr->rc_max_rto_sec) * USEC_IN_SEC);
 	}
 	/* And now apply the user TLP min */
 	if (thresh < bbr_tlp_min) {
@@ -6323,7 +6323,7 @@ tcp_bbr_xmit_timer_commit(struct tcp_bbr *bbr, struct tcpcb *tp, uint32_t cts)
 		}
 	}
 	/* Round it up */
-	rtt_ticks = USEC_2_TICKS((rtt + (USECS_IN_MSEC - 1)));
+	rtt_ticks = USEC_2_TICKS((rtt + (USEC_IN_MSEC - 1)));
 	if (tp->t_srtt != 0) {
 		/*
 		 * srtt is stored as fixed point with 5 bits after the
@@ -6471,7 +6471,7 @@ bbr_nf_measurement(struct tcp_bbr *bbr, struct bbr_sendmap *rsm, uint32_t rtt, u
 		 */
 		delivered = (bbr->r_ctl.rc_delivered - rsm->r_delivered);
 		bw = (uint64_t)delivered;
-		bw *= (uint64_t)USECS_IN_SECOND;
+		bw *= (uint64_t)USEC_IN_SEC;
 		bw /= tim;
 		if (bw == 0) {
 			/* We must have a calculatable amount */
@@ -6498,7 +6498,7 @@ bbr_nf_measurement(struct tcp_bbr *bbr, struct bbr_sendmap *rsm, uint32_t rtt, u
 						    0, 0, 0, delivered);
 			} else {
 				ts_bw = (uint64_t)delivered;
-				ts_bw *= (uint64_t)USECS_IN_SECOND;
+				ts_bw *= (uint64_t)USEC_IN_SEC;
 				ts_bw /= ts_diff;
 				bbr_log_type_bbrupd(bbr, 62, cts,
 						    (ts_bw >> 32),
@@ -6539,7 +6539,7 @@ bbr_nf_measurement(struct tcp_bbr *bbr, struct bbr_sendmap *rsm, uint32_t rtt, u
 			 */
 
 			sbw = (uint64_t)(rsm->r_flight_at_send);
-			sbw *= (uint64_t)USECS_IN_SECOND;
+			sbw *= (uint64_t)USEC_IN_SEC;
 			sti = rsm->r_tim_lastsent[(rsm->r_rtr_cnt -1)] - rsm->r_first_sent_time;
 			sti += rsm->r_pacing_delay;
 			sbw /= sti;
@@ -6586,7 +6586,7 @@ bbr_google_measurement(struct tcp_bbr *bbr, struct bbr_sendmap *rsm, uint32_t rt
 		 */
 		delivered = (bbr->r_ctl.rc_delivered - rsm->r_delivered);
 		bw = (uint64_t)delivered;
-		bw *= (uint64_t)USECS_IN_SECOND;
+		bw *= (uint64_t)USEC_IN_SEC;
 		bw /= tim;
 		if (tim < bbr->r_ctl.rc_lowest_rtt) {
 			bbr_log_type_bbrupd(bbr, 99, cts, (uint32_t)tim, delivered,
@@ -6615,7 +6615,7 @@ bbr_google_measurement(struct tcp_bbr *bbr, struct bbr_sendmap *rsm, uint32_t rt
 			 */
 
 			sbw = (uint64_t)(rsm->r_flight_at_send);
-			sbw *= (uint64_t)USECS_IN_SECOND;
+			sbw *= (uint64_t)USEC_IN_SEC;
 			sti = rsm->r_tim_lastsent[(rsm->r_rtr_cnt -1)] - rsm->r_first_sent_time;
 			sti += rsm->r_pacing_delay;
 			sbw /= sti;
@@ -6753,9 +6753,9 @@ static uint32_t
 bbr_ts_convert(uint32_t cts) {
 	uint32_t sec, msec;
 
-	sec = cts / MS_IN_USEC;
-	msec = cts - (MS_IN_USEC * sec);
-	return ((sec * USECS_IN_SECOND) + (msec * MS_IN_USEC));
+	sec = cts / USEC_IN_MSEC;
+	msec = cts - (USEC_IN_MSEC * sec);
+	return ((sec * USEC_IN_SEC) + (msec * USEC_IN_MSEC));
 }
 
 /*
@@ -6798,10 +6798,10 @@ bbr_update_rtt(struct tcpcb *tp, struct tcp_bbr *bbr,
 	    (ack_type == BBR_CUM_ACKED) &&
 	    (to->to_flags & TOF_TS) &&
 	    (to->to_tsecr != 0)) {
-		t = tcp_tv_to_msec(&bbr->rc_tv) - to->to_tsecr;
+		t = timeval_to_msec(&bbr->rc_tv) - to->to_tsecr;
 		if (t < 1)
 			t = 1;
-		t *= MS_IN_USEC;
+		t *= USEC_IN_MSEC;
 		bbr_update_bbr_info(bbr, rsm, t, cts, to->to_tsecr, 0,
 				    BBR_RTT_BY_TIMESTAMP,
 				    rsm->r_tim_lastsent[(rsm->r_rtr_cnt-1)],
@@ -7336,7 +7336,7 @@ bbr_log_ack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th,
 			uint32_t ts, now, rtt;
 
 			ts = bbr_ts_convert(to->to_tsecr);
-			now = bbr_ts_convert(tcp_tv_to_msec(&bbr->rc_tv));
+			now = bbr_ts_convert(timeval_to_msec(&bbr->rc_tv));
 			rtt = now - ts;
 			if (rtt < 1)
 				rtt = 1;
@@ -8467,7 +8467,7 @@ bbr_do_fastnewdata(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	}
 	if ((to->to_flags & TOF_TS) != 0 &&
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent)) {
-		tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+		tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 		tp->ts_recent = to->to_tsval;
 	}
 	/*
@@ -8900,13 +8900,13 @@ bbr_do_syn_sent(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		if ((to->to_flags & TOF_TS) != 0) {
 			uint32_t t, rtt;
 
-			t = tcp_tv_to_msec(&bbr->rc_tv);
+			t = timeval_to_msec(&bbr->rc_tv);
 			if (TSTMP_GEQ(t, to->to_tsecr)) {
 				rtt = t - to->to_tsecr;
 				if (rtt == 0) {
 					rtt = 1;
 				}
-				rtt *= MS_IN_USEC;
+				rtt *= USEC_IN_MSEC;
 				tcp_bbr_xmit_timer(bbr, rtt, 0, 0, 0);
 				apply_filter_min_small(&bbr->r_ctl.rc_rttprop,
 						       rtt, bbr->r_ctl.rc_rcvtime);
@@ -9041,7 +9041,7 @@ bbr_do_syn_recv(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent) &&
 	    SEQ_LEQ(tp->last_ack_sent, th->th_seq + tlen +
 		    ((thflags & (TH_SYN | TH_FIN)) != 0))) {
-		tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+		tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 		tp->ts_recent = to->to_tsval;
 	}
 	tp->snd_wnd = tiwin;
@@ -9074,13 +9074,13 @@ bbr_do_syn_recv(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	if ((to->to_flags & TOF_TS) != 0) {
 		uint32_t t, rtt;
 
-		t = tcp_tv_to_msec(&bbr->rc_tv);
+		t = timeval_to_msec(&bbr->rc_tv);
 		if (TSTMP_GEQ(t, to->to_tsecr)) {
 			rtt = t - to->to_tsecr;
 			if (rtt == 0) {
 				rtt = 1;
 			}
-			rtt *= MS_IN_USEC;
+			rtt *= USEC_IN_MSEC;
 			tcp_bbr_xmit_timer(bbr, rtt, 0, 0, 0);
 			apply_filter_min_small(&bbr->r_ctl.rc_rttprop, rtt, bbr->r_ctl.rc_rcvtime);
 		}
@@ -9265,7 +9265,7 @@ bbr_do_established(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent) &&
 	    SEQ_LEQ(tp->last_ack_sent, th->th_seq + tlen +
 	    ((thflags & (TH_SYN | TH_FIN)) != 0))) {
-		tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+		tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 		tp->ts_recent = to->to_tsval;
 	}
 	/*
@@ -9362,7 +9362,7 @@ bbr_do_close_wait(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent) &&
 	    SEQ_LEQ(tp->last_ack_sent, th->th_seq + tlen +
 	    ((thflags & (TH_SYN | TH_FIN)) != 0))) {
-		tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+		tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 		tp->ts_recent = to->to_tsval;
 	}
 	/*
@@ -9493,7 +9493,7 @@ bbr_do_fin_wait_1(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent) &&
 	    SEQ_LEQ(tp->last_ack_sent, th->th_seq + tlen +
 	    ((thflags & (TH_SYN | TH_FIN)) != 0))) {
-		tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+		tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 		tp->ts_recent = to->to_tsval;
 	}
 	/*
@@ -9609,7 +9609,7 @@ bbr_do_closing(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent) &&
 	    SEQ_LEQ(tp->last_ack_sent, th->th_seq + tlen +
 	    ((thflags & (TH_SYN | TH_FIN)) != 0))) {
-		tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+		tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 		tp->ts_recent = to->to_tsval;
 	}
 	/*
@@ -9711,7 +9711,7 @@ bbr_do_lastack(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent) &&
 	    SEQ_LEQ(tp->last_ack_sent, th->th_seq + tlen +
 	    ((thflags & (TH_SYN | TH_FIN)) != 0))) {
-		tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+		tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 		tp->ts_recent = to->to_tsval;
 	}
 	/*
@@ -9825,7 +9825,7 @@ bbr_do_fin_wait_2(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    SEQ_LEQ(th->th_seq, tp->last_ack_sent) &&
 	    SEQ_LEQ(tp->last_ack_sent, th->th_seq + tlen +
 	    ((thflags & (TH_SYN | TH_FIN)) != 0))) {
-		tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+		tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 		tp->ts_recent = to->to_tsval;
 	}
 	/*
@@ -9885,7 +9885,7 @@ bbr_google_mode_on(struct tcp_bbr *bbr)
 	bbr->rc_no_pacing = 0;
 	bbr->r_ctl.bbr_google_discount = bbr_google_discount;
 	bbr->r_use_policer = bbr_policer_detection_enabled;
-	bbr->r_ctl.rc_probertt_int = (USECS_IN_SECOND * 10);
+	bbr->r_ctl.rc_probertt_int = (USEC_IN_SEC * 10);
 	bbr->bbr_use_rack_cheat = 0;
 	bbr->r_ctl.rc_incr_tmrs = 0;
 	bbr->r_ctl.rc_inc_tcp_oh = 0;
@@ -9894,7 +9894,7 @@ bbr_google_mode_on(struct tcp_bbr *bbr)
 	reset_time(&bbr->r_ctl.rc_delrate,
 		   BBR_NUM_RTTS_FOR_GOOG_DEL_LIMIT);
 	reset_time_small(&bbr->r_ctl.rc_rttprop,
-			 (11 * USECS_IN_SECOND));
+			 (11 * USEC_IN_SEC));
 	tcp_bbr_tso_size_check(bbr, tcp_get_usecs(&bbr->rc_tv));
 }
 
@@ -9933,7 +9933,7 @@ bbr_google_mode_off(struct tcp_bbr *bbr)
 	reset_time(&bbr->r_ctl.rc_delrate,
 		   bbr_num_pktepo_for_del_limit);
 	reset_time_small(&bbr->r_ctl.rc_rttprop,
-			 (bbr_filter_len_sec * USECS_IN_SECOND));
+			 (bbr_filter_len_sec * USEC_IN_SEC));
 	tcp_bbr_tso_size_check(bbr, tcp_get_usecs(&bbr->rc_tv));
 }
 /*
@@ -10034,7 +10034,7 @@ bbr_init(struct tcpcb *tp, void **ptr)
 	if (bbr->rc_use_google == 0)
 		bbr->r_ctl.rc_probertt_int = bbr_rtt_probe_limit;
 	else
-		bbr->r_ctl.rc_probertt_int = (USECS_IN_SECOND * 10);
+		bbr->r_ctl.rc_probertt_int = (USEC_IN_SEC * 10);
 	bbr->r_ctl.rc_min_rto_ms = bbr_rto_min_ms;
 	bbr->rc_max_rto_sec = bbr_rto_max_sec;
 	bbr->rc_init_win = bbr_def_init_win;
@@ -10070,13 +10070,13 @@ bbr_init(struct tcpcb *tp, void **ptr)
 				  FILTER_TYPE_MAX,
 				  BBR_NUM_RTTS_FOR_GOOG_DEL_LIMIT);
 		setup_time_filter_small(&bbr->r_ctl.rc_rttprop,
-					FILTER_TYPE_MIN, (11 * USECS_IN_SECOND));
+					FILTER_TYPE_MIN, (11 * USEC_IN_SEC));
 	} else {
 		setup_time_filter(&bbr->r_ctl.rc_delrate,
 				  FILTER_TYPE_MAX,
 				  bbr_num_pktepo_for_del_limit);
 		setup_time_filter_small(&bbr->r_ctl.rc_rttprop,
-					FILTER_TYPE_MIN, (bbr_filter_len_sec * USECS_IN_SECOND));
+					FILTER_TYPE_MIN, (bbr_filter_len_sec * USEC_IN_SEC));
 	}
 	bbr_log_rtt_shrinks(bbr, cts, 0, 0, __LINE__, BBR_RTTS_INIT, 0);
 	if (bbr_uses_idle_restart)
@@ -10752,8 +10752,8 @@ bbr_check_probe_rtt_limits(struct tcp_bbr *bbr, uint32_t cts)
 
 		/* Are we to small and go into probe-rtt to often? */
 		baseval = (bbr_get_rtt(bbr, BBR_RTT_PROP) * (BBR_SUBSTATE_COUNT + 1));
-		cur_rttp = roundup(baseval, USECS_IN_SECOND);
-		fval = bbr_filter_len_sec * USECS_IN_SECOND;
+		cur_rttp = roundup(baseval, USEC_IN_SEC);
+		fval = bbr_filter_len_sec * USEC_IN_SEC;
 		if (bbr_is_ratio == 0) {
 			if (fval > bbr_rtt_probe_limit)
 				newval = cur_rttp + (fval - bbr_rtt_probe_limit);
@@ -10782,9 +10782,9 @@ bbr_check_probe_rtt_limits(struct tcp_bbr *bbr, uint32_t cts)
 					 */
 					bbr->r_ctl.rc_probertt_int = bbr_rtt_probe_limit;
 					reset_time_small(&bbr->r_ctl.rc_rttprop,
-							 (bbr_filter_len_sec * USECS_IN_SECOND));
+							 (bbr_filter_len_sec * USEC_IN_SEC));
 					cur_rttp = bbr_rtt_probe_limit;
-					newval = (bbr_filter_len_sec * USECS_IN_SECOND);
+					newval = (bbr_filter_len_sec * USEC_IN_SEC);
 					val = 2;
 				} else {
 					/*
@@ -11334,7 +11334,7 @@ bbr_do_segment_nounlock(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 		mbuf_tstmp2timespec(m, &ts);
 		bbr->rc_tv.tv_sec = ts.tv_sec;
 		bbr->rc_tv.tv_usec = ts.tv_nsec / 1000;
-		bbr->r_ctl.rc_rcvtime = cts = tcp_tv_to_usec(&bbr->rc_tv);
+		bbr->r_ctl.rc_rcvtime = cts = timeval_to_usec(&bbr->rc_tv);
 	} else if (m->m_flags & M_TSTMP_LRO) {
 		/* Next the arrival timestamp */
 		struct timespec ts;
@@ -11342,7 +11342,7 @@ bbr_do_segment_nounlock(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 		mbuf_tstmp2timespec(m, &ts);
 		bbr->rc_tv.tv_sec = ts.tv_sec;
 		bbr->rc_tv.tv_usec = ts.tv_nsec / 1000;
-		bbr->r_ctl.rc_rcvtime = cts = tcp_tv_to_usec(&bbr->rc_tv);
+		bbr->r_ctl.rc_rcvtime = cts = timeval_to_usec(&bbr->rc_tv);
 	} else {
 		/*
 		 * Ok just get the current time.
@@ -11383,7 +11383,7 @@ bbr_do_segment_nounlock(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 	 */
 	if ((to.to_flags & TOF_TS) && (to.to_tsecr != 0)) {
 		to.to_tsecr -= tp->ts_offset;
-		if (TSTMP_GT(to.to_tsecr, tcp_tv_to_msec(&bbr->rc_tv)))
+		if (TSTMP_GT(to.to_tsecr, timeval_to_msec(&bbr->rc_tv)))
 			to.to_tsecr = 0;
 	}
 	/*
@@ -11421,7 +11421,7 @@ bbr_do_segment_nounlock(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 			    (tp->t_flags & TF_REQ_TSTMP)) {
 				tp->t_flags |= TF_RCVD_TSTMP;
 				tp->ts_recent = to.to_tsval;
-				tp->ts_recent_age = tcp_tv_to_msec(&bbr->rc_tv);
+				tp->ts_recent_age = timeval_to_msec(&bbr->rc_tv);
 			} else
 			    tp->t_flags &= ~TF_REQ_TSTMP;
 			if (to.to_flags & TOF_MSS)
@@ -11877,7 +11877,7 @@ bbr_output_wtime(struct tcpcb *tp, const struct timeval *tv)
 	bbr = (struct tcp_bbr *)tp->t_fb_ptr;
 	/* We take a cache hit here */
 	memcpy(&bbr->rc_tv, tv, sizeof(struct timeval));
-	cts = tcp_tv_to_usec(&bbr->rc_tv);
+	cts = timeval_to_usec(&bbr->rc_tv);
 	inp = bbr->rc_inp;
 	hpts_calling = !!(tp->t_flags2 & TF2_HPTS_CALLS);
 	tp->t_flags2 &= ~TF2_HPTS_CALLS;
@@ -12891,7 +12891,7 @@ send:
 		/* Timestamps. */
 		if ((tp->t_flags & TF_RCVD_TSTMP) ||
 		    ((flags & TH_SYN) && (tp->t_flags & TF_REQ_TSTMP))) {
-			to.to_tsval = 	tcp_tv_to_msec(&bbr->rc_tv) + tp->ts_offset;
+			to.to_tsval = 	timeval_to_msec(&bbr->rc_tv) + tp->ts_offset;
 			to.to_tsecr = tp->ts_recent;
 			to.to_flags |= TOF_TS;
 			local_options += TCPOLEN_TIMESTAMP + 2;
@@ -12899,7 +12899,7 @@ send:
 		/* Set receive buffer autosizing timestamp. */
 		if (tp->rfbuf_ts == 0 &&
 		    (so->so_rcv.sb_flags & SB_AUTOSIZE))
-			tp->rfbuf_ts = 	tcp_tv_to_msec(&bbr->rc_tv);
+			tp->rfbuf_ts = 	timeval_to_msec(&bbr->rc_tv);
 		/* Selective ACK's. */
 		if (flags & TH_SYN)
 			to.to_flags |= TOF_SACKPERM;
@@ -14334,7 +14334,7 @@ bbr_set_sockopt(struct tcpcb *tp, struct sockopt *sopt)
 	case TCP_BBR_PROBE_RTT_LEN:
 		BBR_OPTS_INC(tcp_bbr_probertt_len);
 		if (optval <= 1)
-			reset_time_small(&bbr->r_ctl.rc_rttprop, (optval * USECS_IN_SECOND));
+			reset_time_small(&bbr->r_ctl.rc_rttprop, (optval * USEC_IN_SEC));
 		else
 			error = EINVAL;
 		break;
@@ -14631,7 +14631,7 @@ bbr_get_sockopt(struct tcpcb *tp, struct sockopt *sopt)
 		optval = bbr->r_ctl.rc_probertt_int;
 		break;
 	case TCP_BBR_PROBE_RTT_LEN:
-		optval = (bbr->r_ctl.rc_rttprop.cur_time_limit / USECS_IN_SECOND);
+		optval = (bbr->r_ctl.rc_rttprop.cur_time_limit / USEC_IN_SEC);
 		break;
 	case TCP_BBR_PROBE_RTT_GAIN:
 		optval = bbr->r_ctl.bbr_rttprobe_gain_val;

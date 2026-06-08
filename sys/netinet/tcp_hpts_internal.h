@@ -36,37 +36,69 @@
 
 #if defined(_KERNEL)
 
-/*
- * The hpts uses a 102400 wheel. The wheel
- * defines the time in 10 usec increments (102400 x 10).
- * This gives a range of 10usec - 1024ms to place
- * an entry within. If the user requests more than
- * 1.024 second, a remaineder is attached and the hpts
- * when seeing the remainder will re-insert the
- * inpcb forward in time from where it is until
- * the remainder is zero.
- */
-
-#define NUM_OF_HPTSI_SLOTS 102400
-
-/* The number of connections after which the dynamic sleep logic kicks in. */
-#define DEFAULT_CONNECTION_THRESHOLD 100
+#include <sys/histogram.h>
+#include <sys/eventlog.h>
 
 /*
- * The hpts uses a 102400 wheel. The wheel
- * defines the time in 10 usec increments (102400 x 10).
- * This gives a range of 10usec - 1024ms to place
- * an entry within. If the user requests more than
- * 1.024 second, a remaineder is attached and the hpts
- * when seeing the remainder will re-insert the
- * inpcb forward in time from where it is until
- * the remainder is zero.
+ * The HPTS slot duration and wheel size are computed at module load time.
+ * The slot duration defaults to 64 microseconds per slot, and the total
+ * wheel time defaults to 1.048576 seconds (1048576 microseconds). Both values
+ * can be tuned at runtime via loader tunables (which requires a reboot to take
+ * effect). The values are restricted to powers of two to avoid multiplication
+ * and division operations.
+ *
+ * If the connection requests a timeout longer than the wheel can accommodate,
+ * a remainder is stored and the HPTS will re-insert the inpcb with the
+ * remaining time when the wheel completes its current cycle.
  */
 
-#define NUM_OF_HPTSI_SLOTS 102400
+/* Defaults and limits */
+#define HPTS_DEFAULT_TOTAL_SLOT_TIME 0x100000U /* 1,048,576 microseconds */
+#define HPTS_MAX_TOTAL_SLOT_TIME 0x4000000U    /* 67,108,864 microseconds */
+#define HPTS_MIN_TOTAL_SLOTS 2U
+#define HPTS_DEFAULT_USECS_PER_SLOT 64U
+#define HPTS_MAX_USECS_PER_SLOT 0x10000U       /* 65,536 microseconds */
+
+/* Total time covered by all HPTS slots in microseconds (power of two) */
+extern uint32_t hpts_total_slot_time;
+/* Effective microseconds per slot (power-of-two) */
+extern uint32_t hpts_usecs_per_slot;
+/* log2(hpts_usecs_per_slot) for fast division */
+extern uint32_t hpts_usecs_per_slot_shift;
+/* Total slots on the wheel (power-of-two) */
+extern uint32_t hpts_num_slots;
+/* hpts_num_slots - 1, used for fast modulo */
+extern uint32_t hpts_wheel_mask;
 
 /* Convert microseconds to HPTS slots */
-#define HPTS_USEC_TO_SLOTS(x) ((x+9) /10)
+static inline uint32_t hpts_usec_to_slots(uint32_t usec)
+{
+	return ((usec + (hpts_usecs_per_slot - 1)) >> hpts_usecs_per_slot_shift);
+}
+
+/* Convert HPTS slots to microseconds */
+static inline uint32_t hpts_slots_to_usec(uint32_t slots)
+{
+	return (slots << hpts_usecs_per_slot_shift);
+}
+
+/* Map absolute microseconds to the wheel position */
+static inline uint32_t hpts_usecs_to_wheel(uint32_t usec)
+{
+	return ((usec >> hpts_usecs_per_slot_shift) & hpts_wheel_mask);
+}
+
+/* Add slots to a wheel position (wrap via mask) */
+static inline uint32_t hpts_wheel_add(uint32_t wheel_slot, uint32_t plus)
+{
+	return ((wheel_slot + plus) & hpts_wheel_mask);
+}
+
+/* Check if two timestamps are in different slots */
+static inline bool hpts_different_slots(uint32_t a, uint32_t b)
+{
+	return ((a >> hpts_usecs_per_slot_shift) != (b >> hpts_usecs_per_slot_shift));
+}
 
 /* The number of connections after which the dynamic sleep logic kicks in. */
 #define DEFAULT_CONNECTION_THRESHOLD 100
@@ -78,7 +110,7 @@ extern int tcp_bind_threads; 		/* Thread binding configuration
  * Abstraction layer controlling time, interrupts and callouts.
  */
 struct tcp_hptsi_funcs {
-	void (*microuptime)(struct timeval *tv);
+	void (*binuptime)(struct bintime *bt);
 	int (*swi_add)(struct intr_event **eventp, const char *name,
 		driver_intr_t handler, void *arg, int pri, enum intr_type flags,
 		void **cookiep);
@@ -103,10 +135,18 @@ extern const struct tcp_hptsi_funcs tcp_hptsi_default_funcs;
 #define	HPTS_TRYLOCK(hpts)	mtx_trylock(&(hpts)->p_mtx)
 #define	HPTS_UNLOCK(hpts)	mtx_unlock(&(hpts)->p_mtx)
 
+/* All HPTS histograms use the same number of buckets */
+#define HPTS_HISTOGRAM_BUCKETS 16
+/* HPTS histograms: some are linear, some are exponential */
+HISTOGRAM_DECLARE(hpts_hist_lin, HPTS_HISTOGRAM_BUCKETS);
+HISTOGRAM_LIN_GENERATE(hpts_hist_lin);
+HISTOGRAM_DECLARE(hpts_hist_exp, HPTS_HISTOGRAM_BUCKETS);
+HISTOGRAM_EXP_GENERATE(hpts_hist_exp);
+
 struct tcp_hpts_entry {
 	/* Cache line 0x00 */
 	struct mtx p_mtx;		/* Mutex for hpts */
-	struct timeval p_mysleep;	/* Our min sleep time */
+	uint32_t p_mysleep_usec;	/* Our min sleep time in microseconds */
 	uint64_t syscall_cnt;
 	uint64_t sleeping;		/* What the actual sleep was (if sleeping) */
 	uint16_t p_hpts_active; 	/* Flag that says hpts is awake  */
@@ -116,7 +156,15 @@ struct tcp_hpts_entry {
 	uint32_t p_cur_slot;		/* Current slot in wheel hpts is draining */
 	uint32_t p_nxt_slot;		/* The next slot outside the current range
 					 * of slots that the hpts is running on. */
-	int32_t p_on_queue_cnt;		/* Count on queue in this hpts */
+	uint32_t p_tp_cur_count;	/* Current number of TCP connections queued */
+	uint32_t p_tp_max_count;	/* Maximum number of TCP connections ever queued simultaneously */
+	uint64_t p_tp_insert_count;	/* Total number of TCP connections ever inserted */
+	uint64_t p_tp_remove_count;	/* Total number of TCP connections ever removed */
+	uint64_t p_tp_move_count;	/* Total number of TCP connections ever moved */
+	uint64_t p_num_process_callout;	/* Number of times processed via callout path */
+	uint64_t p_num_process_oppor;	/* Number of times processed via opportunistic path */
+	uint64_t p_num_process_oppor_noop;/* Number of times opportunistic processing did nothing */
+	uint64_t p_long_timers_count;	/* Number of timers > 1 second inserted */
 	uint8_t p_direct_wake :1, 	/* boolean */
 		p_on_min_sleep:1, 	/* boolean */
 		p_hpts_wake_scheduled:1,/* boolean */
@@ -129,8 +177,7 @@ struct tcp_hpts_entry {
 		uint32_t		count;
 		uint32_t		gencnt;
 	} *p_hptss;			/* Hptsi wheel */
-	uint32_t p_hpts_sleep_time;	/* Current sleep interval having a max
-					 * of 255ms */
+	uint32_t p_hpts_sleep_time;	/* Current sleep interval in microseconds */
 	uint32_t overidden_sleep;	/* what was overrided by min-sleep for logging */
 	uint32_t saved_curslot;		/* for logging */
 	uint32_t saved_prev_slot;	/* for logging */
@@ -138,10 +185,20 @@ struct tcp_hpts_entry {
 	/* Cache line 0x80 */
 	struct sysctl_ctx_list hpts_ctx;
 	struct sysctl_oid *hpts_root;
+	struct hpts_hist_exp hist_lateness;		/* process_time - expiry_time */
+	struct hpts_hist_exp hist_lateness_usec;	/* lateness in microseconds */
+	struct hpts_hist_lin hist_tp_batch_size;	/* number of connections processed per loop */
+	struct hpts_hist_exp hist_slot_batch_size;	/* number of slots processed per call */
+	struct hpts_hist_exp hist_run_time_callout;	/* runtime for callout-triggered processing */
+	struct hpts_hist_exp hist_run_time_oppor;	/* runtime for opportunistic processing */
+	struct hpts_hist_exp hist_insert_slots;		/* slots requested for timer insertions */
+	struct hpts_hist_lin hist_per_tp_time;		/* average processing time per connection */
+	struct hpts_hist_lin hist_processing_loops;	/* number of processing loops per tcp_hptsi call */
 	struct intr_event *ie;
 	void *ie_cookie;
 	uint16_t p_cpu;			/* The hpts CPU */
 	struct tcp_hptsi *p_hptsi;	/* Back pointer to parent hptsi structure */
+	struct eventlog_session *p_eventlog_session; /* Eventlog session for this CPU */
 	/* There is extra space in here */
 	/* Cache line 0x100 */
 	struct callout co __aligned(CACHE_LINE_SIZE);
@@ -158,6 +215,8 @@ struct tcp_hptsi {
 		int cpu[MAXCPU];
 	} domains[MAXMEMDOM];		/* Per-NUMA domain CPU assignments */
 	const struct tcp_hptsi_funcs *funcs;	/* Function table for testability */
+	struct eventlog_provider *hpts_eventlog_provider; /* Eventlog provider */
+	struct eventlog_session *hpts_eventlog_session_all; /* Eventlog session for "all" */
 };
 
 /*
@@ -169,7 +228,7 @@ void tcp_hptsi_destroy(struct tcp_hptsi *pace);
 void tcp_hptsi_start(struct tcp_hptsi *pace);
 void tcp_hptsi_stop(struct tcp_hptsi *pace);
 uint16_t tcp_hptsi_random_cpu(struct tcp_hptsi *pace);
-int32_t tcp_hptsi(struct tcp_hpts_entry *hpts, bool from_callout);
+uint32_t tcp_hptsi(struct tcp_hpts_entry *hpts, bool from_callout);
 
 void tcp_hpts_wake(struct tcp_hpts_entry *hpts);
 

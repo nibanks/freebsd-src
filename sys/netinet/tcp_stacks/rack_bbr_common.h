@@ -69,10 +69,6 @@
 #define USE_RTT_AVG  2
 
 #define PACE_MAX_IP_BYTES 65536
-#define USECS_IN_SECOND 1000000
-#define MSEC_IN_SECOND 1000
-#define MS_IN_USEC 1000
-#define USEC_TO_MSEC(x) (x / MS_IN_USEC)
 #define TCP_TS_OVERHEAD 12		/* Overhead of having Timestamps on */
 
 /* Bits per second in bytes per second */

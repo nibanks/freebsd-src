@@ -173,7 +173,7 @@ usage(void)
 "    elog -c provider\n"
 "    elog -c provider INFO\n"
 "    elog -c provider INFO 0x3F\n"
-"    elog -c provider1 -c provider2 WARN\n"
+"    elog -c tcp -c hpts WARN\n"
 "    elog -c provider -o /tmp/events.bin\n"
 "    elog -r /tmp/events.bin\n",
 	    EVENTLOG_BUFFER_SIZE_MIN / 1024,

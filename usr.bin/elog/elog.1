@@ -303,7 +303,7 @@ elog -c tcp TRACE
 .Pp
 Subscribe to multiple providers:
 .Bd -literal -offset indent
-elog -c tcp INFO -c provider WARN
+elog -c tcp INFO -c hpts WARN
 .Ed
 .Pp
 Subscribe using numeric levels:
@@ -348,7 +348,7 @@ elog -s -c tcp
 .Pp
 Run a fixed-duration capture, suitable for scripted use:
 .Bd -literal -offset indent
-elog --duration 30 -c tcp -o /tmp/cap.elog
+elog --duration 30 -c tcp -c hpts -o /tmp/cap.elog
 .Ed
 .Sh SEE ALSO
 .Xr elog 5 ,

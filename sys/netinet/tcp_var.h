@@ -320,6 +320,8 @@ struct tcpcb {
 	/* HPTS. Used by BBR and Rack stacks. See tcp_hpts.c for more info. */
 	TAILQ_ENTRY(tcpcb)	t_hpts;		/* linkage to HPTS ring */
 	STAILQ_HEAD(, mbuf)	t_inqueue;	/* HPTS input packets queue */
+	uint32_t t_hpts_request_time;	/* Original requested time (usec) for
+					 * lateness calculations. */
 	uint32_t t_hpts_request;	/* Current hpts request, zero if
 					 * fits in the pacing window. */
 	uint32_t t_hpts_slot;		/* HPTS wheel slot this tcb is. */
@@ -1631,6 +1633,63 @@ tcp_fields_to_net(struct tcphdr *th)
 	th->th_ack = htonl(th->th_ack);
 	th->th_win = htons(th->th_win);
 	th->th_urp = htons(th->th_urp);
+}
+#endif /* _KERNEL */
+
+/*
+ * Time unit conversion constants
+ */
+#define	USEC_IN_SEC	1000000U	/* microseconds per second */
+#define	MSEC_IN_SEC	1000U		/* milliseconds per second */
+#define	USEC_IN_MSEC	1000U		/* microseconds per millisecond */
+
+/*
+ * Time unit conversion macros
+ */
+#define	USEC64_TO_MSEC(x) ((uint32_t)((x) / USEC_IN_MSEC))	/* 64-bit usec timestamp to msec */
+
+/*
+ * Timeval conversion macros
+ */
+static inline uint32_t
+timeval_to_usec(const struct timeval *tv)
+{
+	return ((uint32_t)(((tv)->tv_sec * USEC_IN_SEC) + (tv)->tv_usec));
+}
+
+static inline uint64_t
+timeval_to_usec64(const struct timeval *tv)
+{
+	return ((uint64_t)(((tv)->tv_sec * USEC_IN_SEC) + (tv)->tv_usec));
+}
+
+static inline uint32_t
+timeval_to_msec(const struct timeval *tv)
+{
+	return ((uint32_t)(((tv)->tv_sec * MSEC_IN_SEC) + ((tv)->tv_usec / USEC_IN_MSEC)));
+}
+
+#ifdef _KERNEL
+static inline uint64_t
+tcp_get_u64_usecs(struct timeval *tv)
+{
+	struct timeval tvd;
+
+	if (tv == NULL)
+		tv = &tvd;
+	microuptime(tv);
+	return (timeval_to_usec64(tv));
+}
+
+static inline uint32_t
+tcp_get_usecs(struct timeval *tv)
+{
+	struct timeval tvd;
+
+	if (tv == NULL)
+		tv = &tvd;
+	microuptime(tv);
+	return (timeval_to_usec(tv));
 }
 #endif /* _KERNEL */
 

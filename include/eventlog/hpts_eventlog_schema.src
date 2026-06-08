@@ -1,0 +1,106 @@
+/*
+ * Copyright (c) 2026 Netflix, Inc.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+/*
+ * This file defines the schema for HPTS event logging.
+ * It is processed by eventlog_gen.awk to generate the event log header
+ */
+
+PROVIDER hpts
+
+KEYWORD INIT        1
+KEYWORD CONFIG      2
+KEYWORD STATE       4
+KEYWORD PERFORMANCE 8
+KEYWORD SCHEDULING  16
+
+ENUM bind_type
+    0:NONE
+    1:CPU
+    2:NUMA
+
+STRUCT INIT
+    num_hptss:uint32_t
+    bind_type:uint8_t:enum_bind_type
+    num_slots:uint32_t
+    usecs_per_slot:uint32_t
+    total_slot_time:uint32_t
+STRUCT INIT_HPTS_ENTRY
+STRUCT INIT_TIMING_PARAMS
+    usecs_per_slot:uint32_t
+    total_slot_time:uint32_t
+    num_slots:uint32_t
+    wheel_mask:uint32_t
+STRUCT STATE_ACTIVE
+    from_callout:uint8_t
+    cur_slot:uint32_t
+    tp_cur_count:uint32_t
+STRUCT STATE_INACTIVE
+    slots_ran:uint32_t
+STRUCT SLEEP
+    sleep_time:uint32_t
+STRUCT CONN_INSERT
+    gencnt:uint32_t
+    slot:uint32_t
+    usecs:uint32_t
+    tp_cur_count:uint32_t
+STRUCT CONN_REMOVE
+    gencnt:uint32_t
+    slot:uint32_t
+    tp_cur_count:uint32_t
+STRUCT CONN_MOVE
+    gencnt:uint32_t
+    old_slot:uint32_t
+STRUCT WHEEL_WRAP
+    wrap_loop_cnt:uint32_t
+    slots_to_run:uint32_t
+    prev_slot:uint32_t
+    cur_slot:uint32_t
+STRUCT PROCESSING
+    from_callout:uint8_t
+    prev_slot:uint32_t
+    cur_slot:uint32_t
+    slots_to_run:uint32_t
+    tp_cur_count:uint32_t
+STRUCT PERF_PROCESSING
+    from_callout:uint8_t
+    slots_processed:uint32_t
+    tps_processed:uint32_t
+    runtime_usec:uint32_t
+    loop_cnt:uint32_t
+STRUCT PERF_LATENESS
+    gencnt:uint32_t
+    lateness_slots:uint32_t
+    lateness_usec:uint32_t
+    requested_time:uint32_t
+    actual_time:uint32_t
+
+EVENT INIT  0  INFO  INIT  INIT
+    "Initialized with %u HPTS entries using %s binding: %u slots of %u usec each, total wheel time %u usec"
+EVENT INIT_HPTS_ENTRY  1  INFO  INIT  INIT_HPTS_ENTRY
+    "HPTS entry created"
+EVENT INIT_TIMING_PARAMS  2  INFO  INIT,CONFIG  INIT_TIMING_PARAMS
+    "Timing parameters finalized: %u usec per slot, %u usec total wheel time, %u slots (mask 0x%x)"
+EVENT STATE_ACTIVE  3  INFO  STATE  STATE_ACTIVE
+    "ACTIVE (from_callout=%u), processing slot %u (queue size %u)"
+EVENT STATE_INACTIVE  4  INFO  STATE  STATE_INACTIVE
+    "INACTIVE, completed processing %u slots"
+EVENT SLEEP  5  INFO  STATE  SLEEP
+    "Sleeping for %u usec"
+EVENT CONN_INSERT  6  INFO  SCHEDULING  CONN_INSERT
+    "TCP[%u] inserted on slot %u for %u usec (queue size %u)"
+EVENT CONN_REMOVE  7  INFO  SCHEDULING  CONN_REMOVE
+    "TCP[%u] removed from slot %u (queue size %u)"
+EVENT CONN_MOVE  8  INFO  SCHEDULING  CONN_MOVE
+    "TCP[%u] moved from slot %u (race condition)"
+EVENT WHEEL_WRAP  9  WARN  STATE,PERFORMANCE  WHEEL_WRAP
+    "Wheel wrap detected (loop %u): processing %u slots, prev=%u cur=%u"
+EVENT PROCESSING  10  VERBOSE  PERFORMANCE  PROCESSING
+    "Processing (from_callout=%u): from slot %u to %u, %u slots (queue size %u)"
+EVENT PERF_PROCESSING  11  VERBOSE  PERFORMANCE  PERF_PROCESSING
+    "Processed %u slots, %u connections in %u usec (from_callout=%u, %u loops)"
+EVENT PERF_LATENESS  12  VERBOSE  PERFORMANCE  PERF_LATENESS
+    "TCP[%u] was %u slots (%u usec) late (requested %u, actual %u)"

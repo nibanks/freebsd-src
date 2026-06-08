@@ -172,7 +172,7 @@ rack_update_pcm_ack(struct tcp_rack *rack, int was_cumack, uint32_t start, uint3
 	/*
 	 * Record ACK data.
 	 */
-	ack_arrival = tcp_tv_to_lusec(&rack->r_ctl.act_rcv_time);
+	ack_arrival = timeval_to_usec64(&rack->r_ctl.act_rcv_time);
 	if (SEQ_GT(end, rack->r_ctl.pcm_i.eseq)) {
 		/* Trim the end to the end of our range if it is beyond */
 		end = rack->r_ctl.pcm_i.eseq;
@@ -240,7 +240,7 @@ skip_ack_accounting:
 
 			e = &rack->r_ctl.pcm_s[i];
 			memset(&log, 0, sizeof(log));
-			log.u_bbr.timeStamp = tcp_tv_to_usec(&tv);
+			log.u_bbr.timeStamp = timeval_to_usec(&tv);
 			log.u_bbr.inflight = ctf_flight_size(rack->rc_tp, rack->r_ctl.rc_sacked);
 			log.u_bbr.flex8 = 1;
 			log.u_bbr.flex1 = e->sseq;
@@ -272,7 +272,7 @@ skip_ack_accounting:
 				 * Calculate a b/w between this chunk and the previous.
 				 */
 				log.u_bbr.delRate = (e->eseq - e->sseq);
-				log.u_bbr.delRate *= HPTS_USEC_IN_SEC;
+				log.u_bbr.delRate *= USEC_IN_SEC;
 				log.u_bbr.delRate /= (uint64_t)log.u_bbr.flex3;
 			}
 			log.u_bbr.rttProp = e->ack_time;
@@ -284,7 +284,7 @@ skip_ack_accounting:
 			 * Prev time holds the last ack arrival time.
 			 */
 			memset(&log.u_bbr, 0, sizeof(log.u_bbr));
-			log.u_bbr.timeStamp = tcp_tv_to_usec(&tv);
+			log.u_bbr.timeStamp = timeval_to_usec(&tv);
 			log.u_bbr.inflight = ctf_flight_size(rack->rc_tp, rack->r_ctl.rc_sacked);
 			log.u_bbr.flex8 = 2;
 			log.u_bbr.flex1 = rack->r_ctl.pcm_i.sseq;
@@ -297,7 +297,7 @@ skip_ack_accounting:
 			log.u_bbr.cur_del_rate = rack->r_ctl.pcm_i.send_time;
 			log.u_bbr.rttProp = prev_time;
 			log.u_bbr.delRate = tot_byt;
-			log.u_bbr.delRate *= HPTS_USEC_IN_SEC;
+			log.u_bbr.delRate *= USEC_IN_SEC;
 			log.u_bbr.delRate /= (prev_time - rack->r_ctl.pcm_i.send_time);
 			(void)tcp_log_event(rack->rc_tp, NULL, NULL, NULL, TCP_PCM_MEASURE, ERRNO_UNK,
 					    0, &log, false, NULL, NULL, 0, &tv);

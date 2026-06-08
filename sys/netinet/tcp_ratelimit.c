@@ -55,9 +55,6 @@
 #include <netinet/tcp_hpts.h>
 #include <netinet/tcp_log_buf.h>
 #include <netinet/tcp_ratelimit.h>
-#ifndef USECS_IN_SECOND
-#define USECS_IN_SECOND 1000000
-#endif
 /*
  * For the purposes of each send, what is the size
  * of an ethernet frame.
@@ -691,7 +688,7 @@ bail:
 		/*
 		 * Calculate the time between.
 		 */
-		lentim = ETHERNET_SEGMENT_SIZE * USECS_IN_SECOND;
+		lentim = ETHERNET_SEGMENT_SIZE * USEC_IN_SEC;
 		res = lentim / rs->rs_rlt[i].rate;
 		if (res > 0)
 			rs->rs_rlt[i].time_between = res;
@@ -1696,7 +1693,7 @@ max:
 				    (segsiz * MAX_MSS_SENT), 0, 0, 3);
 		return (segsiz * MAX_MSS_SENT);
 	}
-	lentim = ETHERNET_SEGMENT_SIZE * USECS_IN_SECOND;
+	lentim = ETHERNET_SEGMENT_SIZE * USEC_IN_SEC;
 	res = lentim / bw;
 	if (res > te->time_between) {
 		uint32_t delta, segs, res_div;

@@ -27,7 +27,11 @@
 #define __tcp_hpts_h__
 
 /* Number of useconds represented by an hpts slot */
-#define HPTS_USECS_PER_SLOT 10
+extern uint32_t hpts_usecs_per_slot; /* effective runtime */
+
+/* Compatibility tcp_stack code. XXX: remove dependency on this. */
+#define HPTS_USECS_PER_SLOT hpts_usecs_per_slot
+
 #define HPTS_USEC_IN_SEC 1000000
 #define HPTS_MSEC_IN_SEC 1000
 #define HPTS_USEC_IN_MSEC 1000
@@ -54,11 +58,8 @@ tcp_tv_to_lusec(const struct timeval *sv)
 	return ((uint64_t)((sv->tv_sec * HPTS_USEC_IN_SEC) + sv->tv_usec));
 }
 
-static inline uint64_t
-tcp_tv_to_lusectick(const struct timeval *sv)
-{
-        return ((uint64_t)((sv->tv_sec * HPTS_USEC_IN_SEC) + sv->tv_usec));
-}
+/* Compatibility read_bbrlog code. XXX: remove dependency on this. */
+#define tcp_tv_to_lusectick timeval_to_usec64
 
 
 struct hpts_diag {
@@ -155,28 +156,6 @@ static inline int32_t
 get_hpts_min_sleep_time(void)
 {
 	return (tcp_min_hptsi_time + HPTS_USECS_PER_SLOT);
-}
-
-static inline uint64_t
-tcp_get_u64_usecs(struct timeval *tv)
-{
-	struct timeval tvd;
-
-	if (tv == NULL)
-		tv = &tvd;
-	microuptime(tv);
-	return (tcp_tv_to_lusec(tv));
-}
-
-static inline uint32_t
-tcp_get_usecs(struct timeval *tv)
-{
-	struct timeval tvd;
-
-	if (tv == NULL)
-		tv = &tvd;
-	microuptime(tv);
-	return (tcp_tv_to_usec(tv));
 }
 
 #endif /* _KERNEL */

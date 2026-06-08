@@ -4842,9 +4842,9 @@ tcp_change_time_units(struct tcpcb *tp, int granularity)
 			 */
 			if (frac) {
 				if (hz == 1000) {
-					frac = (((uint64_t)frac * (uint64_t)HPTS_USEC_IN_MSEC) / (uint64_t)TCP_RTT_SCALE);
+					frac = (((uint64_t)frac * (uint64_t)USEC_IN_MSEC) / (uint64_t)TCP_RTT_SCALE);
 				} else {
-					frac = (((uint64_t)frac * (uint64_t)HPTS_USEC_IN_SEC) / ((uint64_t)(hz) * (uint64_t)TCP_RTT_SCALE));
+					frac = (((uint64_t)frac * (uint64_t)USEC_IN_SEC) / ((uint64_t)(hz) * (uint64_t)TCP_RTT_SCALE));
 				}
 				tp->t_srtt += frac;
 			}
@@ -4862,9 +4862,9 @@ tcp_change_time_units(struct tcpcb *tp, int granularity)
 			 */
 			if (frac) {
 				if (hz == 1000) {
-					frac = (((uint64_t)frac * (uint64_t)HPTS_USEC_IN_MSEC) / (uint64_t)TCP_RTT_SCALE);
+					frac = (((uint64_t)frac * (uint64_t)USEC_IN_MSEC) / (uint64_t)TCP_RTT_SCALE);
 				} else {
-					frac = (((uint64_t)frac * (uint64_t)HPTS_USEC_IN_SEC) / ((uint64_t)(hz) * (uint64_t)TCP_RTT_SCALE));
+					frac = (((uint64_t)frac * (uint64_t)USEC_IN_SEC) / ((uint64_t)(hz) * (uint64_t)TCP_RTT_SCALE));
 				}
 				tp->t_rttvar += frac;
 			}
@@ -4879,7 +4879,7 @@ tcp_change_time_units(struct tcpcb *tp, int granularity)
 			uint32_t val, frac;
 
 			val = USEC_2_TICKS(tp->t_srtt);
-			frac = tp->t_srtt % (HPTS_USEC_IN_SEC / hz);
+			frac = tp->t_srtt % (USEC_IN_SEC / hz);
 			tp->t_srtt = val << TCP_RTT_SHIFT;
 			/*
 			 * frac is the fractional part here is left
@@ -4889,9 +4889,9 @@ tcp_change_time_units(struct tcpcb *tp, int granularity)
 			 */
 			if (frac) {
 				if (hz == 1000) {
-					frac = (((uint64_t)frac *  (uint64_t)TCP_RTT_SCALE) / (uint64_t)HPTS_USEC_IN_MSEC);
+					frac = (((uint64_t)frac *  (uint64_t)TCP_RTT_SCALE) / (uint64_t)USEC_IN_MSEC);
 				} else {
-					frac = (((uint64_t)frac * (uint64_t)(hz) * (uint64_t)TCP_RTT_SCALE) /(uint64_t)HPTS_USEC_IN_SEC);
+					frac = (((uint64_t)frac * (uint64_t)(hz) * (uint64_t)TCP_RTT_SCALE) /(uint64_t)USEC_IN_SEC);
 				}
 				tp->t_srtt += frac;
 			}
@@ -4900,7 +4900,7 @@ tcp_change_time_units(struct tcpcb *tp, int granularity)
 			uint32_t val, frac;
 
 			val = USEC_2_TICKS(tp->t_rttvar);
-			frac = tp->t_rttvar % (HPTS_USEC_IN_SEC / hz);
+			frac = tp->t_rttvar % (USEC_IN_SEC / hz);
 			tp->t_rttvar = val <<  TCP_RTTVAR_SHIFT;
 			/*
 			 * frac is the fractional part here is left
@@ -4910,9 +4910,9 @@ tcp_change_time_units(struct tcpcb *tp, int granularity)
 			 */
 			if (frac) {
 				if (hz == 1000) {
-					frac = (((uint64_t)frac *  (uint64_t)TCP_RTTVAR_SCALE) / (uint64_t)HPTS_USEC_IN_MSEC);
+					frac = (((uint64_t)frac *  (uint64_t)TCP_RTTVAR_SCALE) / (uint64_t)USEC_IN_MSEC);
 				} else {
-					frac = (((uint64_t)frac * (uint64_t)(hz) * (uint64_t)TCP_RTTVAR_SCALE) /(uint64_t)HPTS_USEC_IN_SEC);
+					frac = (((uint64_t)frac * (uint64_t)(hz) * (uint64_t)TCP_RTTVAR_SCALE) /(uint64_t)USEC_IN_SEC);
 				}
 				tp->t_rttvar += frac;
 			}
