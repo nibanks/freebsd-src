@@ -325,15 +325,6 @@ FLAG prus_flags
     0x4:PRUS_MORETOCOME
     0x8:PRUS_NOTREADY
 
-FLAG timer_type
-    0x01:DELACK
-    0x02:RACK
-    0x04:TLP
-    0x08:RXT
-    0x10:PERSIST
-    0x20:KEEP
-    0x40:TWOMSL
-
 FLAG conn_params_flags
     0x01:CP_SACK_PERMIT
     0x02:CP_TIMESTAMPS
@@ -514,11 +505,14 @@ STRUCT DSACK
 
 /* Scheduling / Timers */
 STRUCT TIMER_START
-    timeout_us:uint32_t
+    timeout_us:uint64_t
+    reason:uint8_t:enum_timer_reason
+STRUCT TIMER_CANCEL
     reason:uint8_t:enum_timer_reason
 STRUCT TIMER_FIRED
-    timer_type:uint32_t:flag_timer_type
-    result:int32_t
+    reason:uint8_t:enum_timer_reason
+STRUCT TIMER_PROCESSED
+    reason:uint8_t:enum_timer_reason
 STRUCT SB_WAKE
     sb_flags:uint32_t:flag_sb_flags
     len:uint32_t
@@ -634,12 +628,14 @@ EVENT DSACK  402  INFO  LOSS,RX  DSACK
 /* Timers (500-599) */
 EVENT TIMER_START  500  VERBOSE  TIMER  TIMER_START
     "Started %2 timer for %1 us"
-EVENT TIMER_CANCEL  501  VERBOSE  TIMER  NONE
-    "Timer canceled"
+EVENT TIMER_CANCEL  501  VERBOSE  TIMER  TIMER_CANCEL
+    "Canceled %1 timer"
 EVENT TIMER_FIRED  502  VERBOSE  TIMER  TIMER_FIRED
-    "Timer expired (type %1, result %2)"
+    "Fired %1 timer"
 EVENT SB_WAKE  503  VERBOSE  APP  SB_WAKE
     "Socket buffer %4 wakeup (%2 bytes, flags %1, state %3)"
+EVENT TIMER_PROCESSED  504  VERBOSE  TIMER  TIMER_PROCESSED
+    "Processed %1 timer"
 
 /* Pacing (600-699) */
 EVENT PACING_CALC  600  VERBOSE  PACING  PACING_CALC

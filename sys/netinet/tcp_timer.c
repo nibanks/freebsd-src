@@ -830,6 +830,15 @@ tcp_timer_rexmt(struct tcpcb *tp)
 	return (rv);
 }
 
+/* Map a tt_which onto the eventlog timer_reason enum. */
+static uint8_t const tcp_eventlog_timer_reason[TT_N] = {
+	[TT_REXMT] = TCP_EVENTLOG_TIMER_REASON_RXT,
+	[TT_PERSIST] = TCP_EVENTLOG_TIMER_REASON_PERSIST,
+	[TT_KEEP] = TCP_EVENTLOG_TIMER_REASON_KEEPALIVE,
+	[TT_2MSL] = TCP_EVENTLOG_TIMER_REASON_TWOMSL,
+	[TT_DELACK] = TCP_EVENTLOG_TIMER_REASON_DELAYACK,
+};
+
 static void
 tcp_bblog_timer(struct tcpcb *tp, tt_which which, tt_what what, uint32_t ticks)
 {
@@ -894,8 +903,12 @@ tcp_timer_enter(void *xtp)
 	tp->t_precisions[which] = 0;
 
 	tcp_bblog_timer(tp, which, TT_PROCESSING, 0);
+	TCP_EVENTLOG_TIMER_FIRED_LOG(tp->t_eventlog_session,
+	    tcp_eventlog_timer_reason[which]);
 	if (tcp_timersw[which](tp)) {
 		tcp_bblog_timer(tp, which, TT_PROCESSED, 0);
+		TCP_EVENTLOG_TIMER_PROCESSED_LOG(tp->t_eventlog_session,
+		    tcp_eventlog_timer_reason[which]);
 		if ((which = tcp_timer_next(tp, &precision)) != TT_N) {
 			MPASS(tp->t_state > TCPS_CLOSED);
 			callout_reset_sbt_on(&tp->t_callout,
@@ -928,9 +941,14 @@ tcp_timer_activate(struct tcpcb *tp, tt_which which, u_int delta)
 		what = TT_STARTING;
 		callout_when(tick_sbt * delta, 0, C_HARDCLOCK,
 		    &tp->t_timers[which], &tp->t_precisions[which]);
+		TCP_EVENTLOG_TIMER_START_LOG(tp->t_eventlog_session,
+		    (((uint64_t)delta * 1000000) + (hz - 1)) / hz,
+		    tcp_eventlog_timer_reason[which]);
 	} else {
 		what = TT_STOPPING;
 		tp->t_timers[which] = SBT_MAX;
+		TCP_EVENTLOG_TIMER_CANCEL_LOG(tp->t_eventlog_session,
+		    tcp_eventlog_timer_reason[which]);
 	}
 	tcp_bblog_timer(tp, which, what, delta);
 
