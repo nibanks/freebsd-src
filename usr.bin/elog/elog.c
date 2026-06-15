@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <sys/ioccom.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -944,145 +945,161 @@ sigint_handler(int sig __unused)
 }
 
 /*
- * Parse command line arguments and populate global state.
+ * Append a subscription for "-c <provider> [level] [keywords]". The provider
+ * is the option-argument (optarg); the optional level and keywords are picked
+ * up from the following operands, advancing optind past any we consume.
  */
-static bool
-arg_match(const char *arg, const char *long_form, const char *short_form)
+static void
+parse_capture_arg(int argc, char *argv[])
 {
-	return (strcmp(arg, long_form) == 0 ||
-	    (short_form != NULL && strcmp(arg, short_form) == 0));
+	enum eventlog_level level = EVENTLOG_LEVEL_VERBOSE;
+	uint32_t keywords = 0xFFFFFFFF;
+
+	if (subscription_count >= subscription_capacity) {
+		int new_capacity = (subscription_capacity == 0)
+		    ? 16 : subscription_capacity * 2;
+		struct subscription *new_subscriptions =
+		    realloc(subscriptions, new_capacity *
+		    sizeof(struct subscription));
+		if (new_subscriptions == NULL)
+			errx(1, "failed to allocate subscriptions");
+		subscriptions = new_subscriptions;
+		subscription_capacity = new_capacity;
+	}
+
+	if (strlen(optarg) >= EVENTLOG_PROVIDER_NAME_MAX)
+		errx(1, "provider name too long");
+
+	memset(&subscriptions[subscription_count], 0,
+	    sizeof(subscriptions[0]));
+	strlcpy(subscriptions[subscription_count].provider_name, optarg,
+	    sizeof(subscriptions[0].provider_name));
+
+	if (optind < argc && argv[optind][0] != '-' &&
+	    try_parse_level(argv[optind], &level))
+		optind++;
+
+	/* Optional keywords (hex 0x prefix or pipe-delimited names). */
+	if (optind < argc && argv[optind][0] != '-' &&
+	    try_parse_keywords(subscriptions[subscription_count].provider_name,
+	    argv[optind], &keywords))
+		optind++;
+
+	/* Always include SESSION for lifecycle events. */
+	subscriptions[subscription_count].level = level;
+	subscriptions[subscription_count].keywords =
+	    keywords | EVENTLOG_KEYWORD_SESSION;
+	subscription_count++;
 }
+
+/*
+ * Parse command line arguments and populate global state. Options that have
+ * no single-letter form use synthetic values above the byte range.
+ */
+enum {
+	OPT_DURATION = 256,
+	OPT_DELTA_TIME,
+};
 
 static void
 parse_arguments(int argc, char *argv[])
 {
-	int arg_idx;
-	const char *arg;
+	static const struct option longopts[] = {
+		{ "capture",	   required_argument, NULL, 'c' },
+		{ "buffer-size",   required_argument, NULL, 'b' },
+		{ "duration",	   required_argument, NULL, OPT_DURATION },
+		{ "date",	   no_argument,	      NULL, 'd' },
+		{ "event-name",	   no_argument,	      NULL, 'e' },
+		{ "event-number",  no_argument,	      NULL, 'n' },
+		{ "providers",	   no_argument,	      NULL, 'p' },
+		{ "stats",	   no_argument,	      NULL, 's' },
+		{ "output",	   required_argument, NULL, 'o' },
+		{ "read-binary",   required_argument, NULL, 'r' },
+		{ "relative-time", no_argument,	      NULL, 't' },
+		{ "delta-time",	   no_argument,	      NULL, OPT_DELTA_TIME },
+		{ "dump-state",	   no_argument,	      NULL, 'D' },
+		{ "help",	   no_argument,	      NULL, 'h' },
+		{ NULL,		   0,		      NULL, 0 },
+	};
+	int ch;
 
-	for (arg_idx = 1; arg_idx < argc; arg_idx++) {
-		arg = argv[arg_idx];
-		if (arg_match(arg, "--capture", "-c")) {
-			enum eventlog_level level = EVENTLOG_LEVEL_VERBOSE;
-			uint32_t keywords = 0xFFFFFFFF;
-			int next_idx = arg_idx + 1;
-
-			if (subscription_count >= subscription_capacity) {
-				int new_capacity = (subscription_capacity == 0)
-				    ? 16 : subscription_capacity * 2;
-				struct subscription *new_subscriptions =
-				    realloc(subscriptions, new_capacity *
-				    sizeof(struct subscription));
-				if (new_subscriptions == NULL)
-					errx(1,
-					    "failed to allocate subscriptions");
-				subscriptions = new_subscriptions;
-				subscription_capacity = new_capacity;
-			}
-
-			if (next_idx >= argc)
-				errx(1,
-				    "--capture requires at least provider name");
-
-			if (strlen(argv[next_idx]) >=
-			    EVENTLOG_PROVIDER_NAME_MAX)
-				errx(1, "provider name too long");
-
-			memset(&subscriptions[subscription_count], 0,
-			    sizeof(subscriptions[0]));
-			strlcpy(subscriptions[subscription_count].provider_name,
-			    argv[next_idx],
-			    sizeof(subscriptions[0].provider_name));
-			next_idx++;
-
-			if (next_idx < argc &&
-			    try_parse_level(argv[next_idx], &level))
-				next_idx++;
-
-			/*
-			 * Optional keywords (hex 0x prefix or pipe-delimited
-			 * names).
-			 */
-			if (next_idx < argc &&
-			    try_parse_keywords(
-				subscriptions[subscription_count].provider_name,
-				argv[next_idx], &keywords))
-				next_idx++;
-
-			/* Always include SESSION for lifecycle events. */
-			subscriptions[subscription_count].level = level;
-			subscriptions[subscription_count].keywords =
-			    keywords | EVENTLOG_KEYWORD_SESSION;
-
-			arg_idx = next_idx - 1;
-			subscription_count++;
-		} else if (arg_match(arg, "--buffer-size", "-b")) {
-			int next_idx = arg_idx + 1;
-			if (next_idx >= argc)
-				errx(1, "--buffer-size requires a size value");
-			buffer_size_per_cpu = parse_size(argv[next_idx]);
-			arg_idx = next_idx;
-		} else if (arg_match(arg, "--duration", NULL)) {
-			int next_idx = arg_idx + 1;
+	/*
+	 * Leading '+' keeps operands in order so "-c <provider> [level]
+	 * [keywords]" can consume the operands that follow it; getopt_long
+	 * still allows clustered flags such as "-enr file.elog".
+	 */
+	while ((ch = getopt_long(argc, argv, "+b:c:dDehno:pr:st", longopts,
+	    NULL)) != -1) {
+		switch (ch) {
+		case 'c':
+			parse_capture_arg(argc, argv);
+			break;
+		case 'b':
+			buffer_size_per_cpu = parse_size(optarg);
+			break;
+		case OPT_DURATION: {
 			char *endptr;
 			unsigned long val;
 
-			if (next_idx >= argc)
-				errx(1, "--duration requires a seconds value");
-			val = strtoul(argv[next_idx], &endptr, 10);
-			if (*argv[next_idx] == '\0' || *endptr != '\0')
-				errx(1, "--duration: not a number: %s",
-				    argv[next_idx]);
+			val = strtoul(optarg, &endptr, 10);
+			if (*optarg == '\0' || *endptr != '\0')
+				errx(1, "--duration: not a number: %s", optarg);
 			if (val > UINT_MAX)
 				errx(1, "--duration: value too large");
 			duration_sec = (unsigned int)val;
-			arg_idx = next_idx;
-		} else if (arg_match(arg, "--date", "-d")) {
+			break;
+		}
+		case 'd':
 			show_date = true;
-		} else if (arg_match(arg, "--event-name", "-e")) {
+			break;
+		case 'e':
 			show_event_name = true;
-		} else if (arg_match(arg, "--event-number", "-n")) {
+			break;
+		case 'n':
 			show_event_number = true;
-		} else if (arg_match(arg, "--providers", "-p")) {
+			break;
+		case 'p':
 			show_providers = true;
-		} else if (arg_match(arg, "--stats", "-s")) {
+			break;
+		case 's':
 			verbose_stats = true;
-		} else if (arg_match(arg, "--output", "-o")) {
-			int next_idx = arg_idx + 1;
-			if (next_idx >= argc)
-				errx(1,
-				    "--output requires a filename or dir=path");
-			if (strncmp(argv[next_idx], "dir=", 4) == 0) {
-				output_dir = strdup(argv[next_idx] + 4);
+			break;
+		case 'o':
+			if (strncmp(optarg, "dir=", 4) == 0) {
+				output_dir = strdup(optarg + 4);
 				if (output_dir == NULL)
 					err(1, "strdup");
 				if (mkdir(output_dir, 0755) != 0 &&
 				    errno != EEXIST)
 					err(1, "mkdir(%s)", output_dir);
 			} else {
-				single_output.fp = fopen(argv[next_idx], "wb");
+				single_output.fp = fopen(optarg, "wb");
 				if (single_output.fp == NULL)
-					err(1, "fopen(%s)", argv[next_idx]);
+					err(1, "fopen(%s)", optarg);
 			}
-			arg_idx = next_idx;
-		} else if (arg_match(arg, "--relative-time", "-t")) {
+			break;
+		case 'r':
+			binary_input_file = optarg;
+			break;
+		case 't':
 			show_relative_time = true;
-		} else if (arg_match(arg, "--delta-time", NULL)) {
+			break;
+		case OPT_DELTA_TIME:
 			show_delta_time = true;
-		} else if (arg_match(arg, "--dump-state", "-D")) {
+			break;
+		case 'D':
 			dump_state = true;
-		} else if (arg_match(arg, "--read-binary", "-r")) {
-			int next_idx = arg_idx + 1;
-			if (next_idx >= argc)
-				errx(1, "--read-binary requires a filename");
-			binary_input_file = argv[next_idx];
-			arg_idx = next_idx;
-		} else if (arg_match(arg, "--help", "-h")) {
+			break;
+		case 'h':
 			usage();
-		} else {
-			errx(1, "unknown argument: %s (use --capture or -c)",
-			    arg);
+			break;
+		default:
+			usage();
 		}
 	}
+
+	if (optind < argc)
+		errx(1, "unexpected argument: %s", argv[optind]);
 }
 
 /*
