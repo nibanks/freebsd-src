@@ -604,7 +604,8 @@ write_binary_event(const struct eventlog_event_header *hdr,
 	struct session_file *sf;
 	size_t event_length;
 
-	snprintf(session_id_str, sizeof(session_id_str), "%lu",
+	snprintf(session_id_str, sizeof(session_id_str), "%s_%lu",
+	    get_provider_name(hdr->provider_id),
 	    (unsigned long)hdr->session_id);
 
 	if (output_dir != NULL) {

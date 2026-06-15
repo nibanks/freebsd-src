@@ -657,15 +657,21 @@ tcp_eventlog_dump_session(struct tcpcb *tp, const char *log_id)
 
 	TCP_EVENTLOG_SESSION_CREATE_LOG(tp->t_eventlog_session, tp);
 
+	/*
+	 * Only emit the address once the local port is assigned; otherwise a
+	 * socket that enables logging before bind()/connect() would log an
+	 * all-zero 4-tuple, and a later connect() would log a second one.
+	 * A zero foreign port is fine: that is a listening socket.
+	 */
 #ifdef INET
-	if (inp->inp_vflag & INP_IPV4) {
+	if ((inp->inp_vflag & INP_IPV4) && inp->inp_lport != 0) {
 		TCP_EVENTLOG_CONN_SET_IP_V4_LOG(tp->t_eventlog_session,
 		    inp->inp_laddr, inp->inp_lport,
 		    inp->inp_faddr, inp->inp_fport);
 	}
 #endif
 #ifdef INET6
-	if (inp->inp_vflag & INP_IPV6) {
+	if ((inp->inp_vflag & INP_IPV6) && inp->inp_lport != 0) {
 		TCP_EVENTLOG_CONN_SET_IP_V6_LOG(tp->t_eventlog_session,
 		    inp->inp_inc.inc6_laddr, inp->inp_lport,
 		    inp->inp_inc.inc6_faddr, inp->inp_fport);
