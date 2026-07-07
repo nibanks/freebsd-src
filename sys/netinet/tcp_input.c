@@ -1525,7 +1525,9 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 	    tp->t_state,
 	    th->th_off,
 	    th->th_urp,
-	    tcp_get_u64_usecs(NULL));
+	    tcp_get_u64_usecs(NULL),
+	    (uint8_t)((th->th_off << 2) - sizeof(struct tcphdr)),
+	    (const uint8_t *)(th + 1));
 
 	if ((thflags & TH_SYN) && (thflags & TH_FIN) && V_drop_synfin) {
 		if ((s = tcp_log_addrs(inc, th, NULL, NULL))) {
