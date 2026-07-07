@@ -1464,6 +1464,8 @@ int tcp_default_ctloutput(struct tcpcb *tp, struct sockopt *sopt);
 int tcp_ctloutput_set(struct inpcb *inp, struct sockopt *sopt);
 void tcp_log_socket_option(struct tcpcb *tp, uint32_t option_num,
     uint32_t option_val, int err);
+void tcp_log_socket_option_blob(struct tcpcb *tp, uint32_t option_num,
+    const void *buf, uint16_t len, int err);
 
 
 extern counter_u64_t tcp_inp_lro_direct_queue;

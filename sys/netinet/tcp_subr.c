@@ -5365,6 +5365,19 @@ tcp_log_socket_option(struct tcpcb *tp, uint32_t option_num, uint32_t option_val
 	}
 }
 
+void
+tcp_log_socket_option_blob(struct tcpcb *tp, uint32_t option_num,
+    const void *buf, uint16_t len, int err)
+{
+	if (err != 0) {
+		TCP_EVENTLOG_SOCKET_OPT_ERR_LOG(tp->t_eventlog_session,
+		    option_num, err);
+	} else {
+		TCP_EVENTLOG_SOCKET_OPT_BLOB_LOG(tp->t_eventlog_session,
+		    option_num, len, buf);
+	}
+}
+
 uint32_t
 tcp_get_srtt(struct tcpcb *tp, int granularity)
 {

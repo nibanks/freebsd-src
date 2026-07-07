@@ -556,6 +556,10 @@ STRUCT SOCKET_OPT_UINT32
 STRUCT SOCKET_OPT_ERR
     option_num:uint32_t:enum_socket_option
     err:int32_t
+STRUCT SOCKET_OPT_BLOB
+    option_num:uint32_t:enum_socket_option
+    option_len:uint16_t
+    option_val:uint8_t[option_len:64]
 
 /* Output */
 STRUCT OUTPUT_DECISION
@@ -667,6 +671,8 @@ EVENT SOCKET_OPT_UINT32  700  INFO  APP,CONN  SOCKET_OPT_UINT32
     "Socket option %1 set to %2"
 EVENT SOCKET_OPT_ERR  701  WARN  APP,CONN  SOCKET_OPT_ERR
     "Socket option %1 failed with error %2"
+EVENT SOCKET_OPT_BLOB  702  INFO  APP,CONN  SOCKET_OPT_BLOB
+    "Socket option %1 set to %3 (%2 bytes)"
 
 /* Output (800-899) */
 EVENT OUTPUT_DECISION  800  TRACE  TX  OUTPUT_DECISION
