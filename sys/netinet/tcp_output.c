@@ -1437,7 +1437,9 @@ send:
 	    tp->snd_cwnd,
 	    tp->t_state,
 	    th->th_off,
-	    ntohs(th->th_urp));
+	    ntohs(th->th_urp),
+	    (uint8_t)((th->th_off << 2) - sizeof(struct tcphdr)),
+	    (const uint8_t *)(th + 1));
 
 	/*
 	 * Fill in IP length and desired time to live and

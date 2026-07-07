@@ -2276,7 +2276,9 @@ bbr_log_ack_event(struct tcp_bbr *bbr, struct tcphdr *th, struct tcpopt *to, uin
 	    bbr->rc_tp->t_state,
 	    th->th_off,
 	    th->th_urp,
-	    tcp_tv_to_lusec(&bbr->rc_tv));
+	    tcp_tv_to_lusec(&bbr->rc_tv),
+	    (uint8_t)((th->th_off << 2) - sizeof(struct tcphdr)),
+	    (const uint8_t *)(th + 1));
 }
 
 static void
@@ -13528,7 +13530,9 @@ send:
 	    tp->snd_cwnd,
 	    tp->t_state,
 	    th->th_off,
-	    ntohs(th->th_urp));
+	    ntohs(th->th_urp),
+	    (uint8_t)((th->th_off << 2) - sizeof(struct tcphdr)),
+	    (const uint8_t *)(th + 1));
 	/*
 	 * Fill in IP length and desired time to live and send to IP level.
 	 * There should be a better way to handle ttl and tos; we could keep

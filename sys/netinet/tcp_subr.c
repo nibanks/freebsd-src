@@ -2403,7 +2403,9 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		    tp->snd_cwnd,
 		    tp->t_state,
 		    nth->th_off,
-		    ntohs(nth->th_urp));
+		    ntohs(nth->th_urp),
+		    (uint8_t)((nth->th_off << 2) - sizeof(struct tcphdr)),
+		    (const uint8_t *)(nth + 1));
 	}
 	if ((tp != NULL) && tcp_bblogging_on(tp)) {
 		if (INP_WLOCKED(inp)) {

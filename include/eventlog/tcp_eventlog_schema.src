@@ -383,6 +383,8 @@ STRUCT IN
     th_off:uint8_t
     th_urp:uint16_t
     rcv_time_us:uint64_t
+    option_len:uint8_t
+    option:uint8_t[option_len:40]
 STRUCT OUT
     seq:uint32_t
     ack:uint32_t
@@ -394,6 +396,8 @@ STRUCT OUT
     state:uint8_t:enum_tcp_state
     th_off:uint8_t
     th_urp:uint16_t
+    option_len:uint8_t
+    option:uint8_t[option_len:40]
 STRUCT USER_SEND
     error:int32_t
     flags:uint32_t:flag_prus_flags
@@ -579,9 +583,9 @@ EVENT CC_ALGO_CHANGE  7  INFO  CONN,CC  CC_ALGO_CHANGE
 
 /* Data plane (100-199) */
 EVENT IN  100  VERBOSE  RX  IN
-    "Received %6 bytes (seq %1, ack %2, win %5, flags %3) in state %7 rcv_time %10 us"
+    "Received %6 bytes (seq %1, ack %2, win %5, flags %3) in state %7 rcv_time %10 us, %11 option bytes"
 EVENT OUT  101  VERBOSE  TX  OUT
-    "Sent %6 bytes (seq %1, ack %2, win %5, flags %3) in state %8 cwnd %7"
+    "Sent %6 bytes (seq %1, ack %2, win %5, flags %3) in state %8 cwnd %7, %11 option bytes"
 EVENT ACK  102  VERBOSE  RX,CC  ACK
     "Acknowledged %1 bytes to %2 (%3 in flight, %4 sacked, %5 segments, rcv_time %6 us)"
 EVENT SACK  103  VERBOSE  RX,CC  SACK
