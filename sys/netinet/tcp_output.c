@@ -1437,7 +1437,6 @@ send:
 	    tp->snd_cwnd,
 	    tp->t_state,
 	    th->th_off,
-	    ntohs(th->th_sum),
 	    ntohs(th->th_urp));
 
 	/*
