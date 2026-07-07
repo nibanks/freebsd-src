@@ -381,7 +381,6 @@ STRUCT IN
     len:uint32_t
     state:uint8_t:enum_tcp_state
     th_off:uint8_t
-    th_sum:uint16_t:hex
     th_urp:uint16_t
     rcv_time_us:uint64_t
 STRUCT OUT
@@ -394,7 +393,6 @@ STRUCT OUT
     cwnd:uint32_t
     state:uint8_t:enum_tcp_state
     th_off:uint8_t
-    th_sum:uint16_t:hex
     th_urp:uint16_t
 STRUCT USER_SEND
     error:int32_t
@@ -581,7 +579,7 @@ EVENT CC_ALGO_CHANGE  7  INFO  CONN,CC  CC_ALGO_CHANGE
 
 /* Data plane (100-199) */
 EVENT IN  100  VERBOSE  RX  IN
-    "Received %6 bytes (seq %1, ack %2, win %5, flags %3) in state %7 rcv_time %11 us"
+    "Received %6 bytes (seq %1, ack %2, win %5, flags %3) in state %7 rcv_time %10 us"
 EVENT OUT  101  VERBOSE  TX  OUT
     "Sent %6 bytes (seq %1, ack %2, win %5, flags %3) in state %8 cwnd %7"
 EVENT ACK  102  VERBOSE  RX,CC  ACK

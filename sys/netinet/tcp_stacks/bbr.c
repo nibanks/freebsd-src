@@ -2275,7 +2275,6 @@ bbr_log_ack_event(struct tcp_bbr *bbr, struct tcphdr *th, struct tcpopt *to, uin
 	    tlen,
 	    bbr->rc_tp->t_state,
 	    th->th_off,
-	    ntohs(th->th_sum),
 	    th->th_urp,
 	    tcp_tv_to_lusec(&bbr->rc_tv));
 }
@@ -13529,7 +13528,6 @@ send:
 	    tp->snd_cwnd,
 	    tp->t_state,
 	    th->th_off,
-	    ntohs(th->th_sum),
 	    ntohs(th->th_urp));
 	/*
 	 * Fill in IP length and desired time to live and send to IP level.

@@ -2403,7 +2403,6 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		    tp->snd_cwnd,
 		    tp->t_state,
 		    nth->th_off,
-		    ntohs(nth->th_sum),
 		    ntohs(nth->th_urp));
 	}
 	if ((tp != NULL) && tcp_bblogging_on(tp)) {

@@ -1524,7 +1524,6 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 	    tlen,
 	    tp->t_state,
 	    th->th_off,
-	    ntohs(th->th_sum),
 	    th->th_urp,
 	    tcp_get_u64_usecs(NULL));
 
