@@ -824,6 +824,8 @@ tcp_usr_shutdown(struct socket *so, enum shutdown_how how)
 		NET_EPOCH_ENTER(et);
 		tcp_usrclosed(tp);
 		error = tcp_output_nodrop(tp);
+		TCP_EVENTLOG_SHUTDOWN_LOG(tp->t_eventlog_session,
+		    how, tp->t_state, error);
 		tcp_bblog_pru(tp, PRU_SHUTDOWN, error);
 		TCP_PROBE2(debug__user, tp, PRU_SHUTDOWN);
 		error = tcp_unlock_or_drop(tp, error);
@@ -1279,6 +1281,7 @@ tcp_usr_close(struct socket *so)
 	 */
 	NET_EPOCH_ENTER(et);
 	INP_WLOCK(inp);
+	TCP_EVENTLOG_CLOSE_LOG(tp->t_eventlog_session, tp->t_state);
 	if (!(tp->t_flags & TF_DISCONNECTED)) {
 		if (tp->t_state != TCPS_TIME_WAIT) {
 			tp->t_flags |= TF_CLOSED;
