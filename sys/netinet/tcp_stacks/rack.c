@@ -23603,7 +23603,11 @@ rack_process_option(struct tcpcb *tp, struct tcp_rack *rack, int sopt_name,
 	default:
 		break;
 	}
-	tcp_log_socket_option(tp, sopt_name, optval, error);
+	if ((sopt_name == TCP_HYBRID_PACING) && (hybrid != NULL))
+		tcp_log_socket_option_blob(tp, sopt_name, hybrid,
+		    sizeof(*hybrid), error);
+	else
+		tcp_log_socket_option(tp, sopt_name, optval, error);
 	return (error);
 }
 
