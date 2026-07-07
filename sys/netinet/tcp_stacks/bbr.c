@@ -92,6 +92,7 @@
 #include <netinet/tcp_hpts.h>
 #include <netinet/cc/cc.h>
 #include <netinet/tcp_log_buf.h>
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/tcp_ratelimit.h>
 #include <netinet/tcp_lro.h>
 #ifdef TCP_OFFLOAD
@@ -2265,6 +2266,19 @@ bbr_log_ack_event(struct tcp_bbr *bbr, struct tcphdr *th, struct tcpopt *to, uin
 		    TCP_LOG_IN, 0,
 		    tlen, &log, true, &bbr->rc_tv);
 	}
+	TCP_EVENTLOG_IN_LOG(bbr->rc_tp->t_eventlog_session,
+	    th->th_seq,
+	    th->th_ack,
+	    tcp_get_flags(th),
+	    th->th_win,
+	    (uint32_t)th->th_win << bbr->rc_tp->snd_scale,
+	    tlen,
+	    bbr->rc_tp->t_state,
+	    th->th_off,
+	    th->th_urp,
+	    tcp_tv_to_lusec(&bbr->rc_tv),
+	    (uint8_t)((th->th_off << 2) - sizeof(struct tcphdr)),
+	    (const uint8_t *)(th + 1));
 }
 
 static void
@@ -8789,6 +8803,7 @@ bbr_do_syn_sent(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		    (TF_RCVD_SCALE | TF_REQ_SCALE)) {
 			tp->rcv_scale = tp->request_r_scale;
 		}
+		tcp_eventlog_conn_params(tp);
 		tp->rcv_adv += min(tp->rcv_wnd,
 		    TCP_MAXWIN << tp->rcv_scale);
 		/*
@@ -13505,6 +13520,19 @@ send:
 	} else {
 		lgb = NULL;
 	}
+	TCP_EVENTLOG_OUT_LOG(tp->t_eventlog_session,
+	    ntohl(th->th_seq),
+	    ntohl(th->th_ack),
+	    tcp_get_flags(th),
+	    ntohs(th->th_win),
+	    (uint32_t)ntohs(th->th_win) << tp->rcv_scale,
+	    len,
+	    tp->snd_cwnd,
+	    tp->t_state,
+	    th->th_off,
+	    ntohs(th->th_urp),
+	    (uint8_t)((th->th_off << 2) - sizeof(struct tcphdr)),
+	    (const uint8_t *)(th + 1));
 	/*
 	 * Fill in IP length and desired time to live and send to IP level.
 	 * There should be a better way to handle ttl and tos; we could keep

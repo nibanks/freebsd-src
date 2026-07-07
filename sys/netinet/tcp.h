@@ -219,6 +219,7 @@ __tcp_set_flags(struct tcphdr *th, uint16_t flags)
 #define	TCP_PROC_ACCOUNTING	76	/* Do accounting on tcp cpu usage and counts */
 #define	TCP_USE_CMP_ACKS	77	/* The transport can handle the Compressed mbuf acks */
 #define	TCP_PERF_INFO		78	/* retrieve accounting counters */
+#define	TCP_EVENTLOG		81	/* enable/disable eventlog */
 #define	TCP_KEEPINIT		128	/* N, time to establish connection */
 #define	TCP_KEEPIDLE		256	/* L,N,X start keeplives after this period */
 #define	TCP_KEEPINTVL		512	/* L,N interval between keepalives */

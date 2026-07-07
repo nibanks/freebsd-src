@@ -214,7 +214,7 @@ ${FULLKERNEL}: ${SYSTEM_DEP} vers.o
 	${SYSTEM_LD_TAIL}
 
 OBJS_DEPEND_GUESS+=	offset.inc assym.inc vnode_if.h ${BEFORE_DEPEND:M*.h} \
-			${MFILES:T:S/.m$/.h/}
+			${MFILES:T:S/.m$/.h/} ${EVENTLOG_HEADERS}
 
 .for mfile in ${MFILES}
 # XXX the low quality .m.o rules gnerated by config are normally used
@@ -291,7 +291,7 @@ _SKIP_DEPEND=	1
 kernel-depend: .depend
 SRCS=	assym.inc offset.inc vnode_if.h ${BEFORE_DEPEND} ${CFILES} \
 	${SYSTEM_CFILES} ${GEN_CFILES} ${SFILES} \
-	${MFILES:T:S/.m$/.h/}
+	${MFILES:T:S/.m$/.h/} ${EVENTLOG_HEADERS}
 DEPENDOBJS+=	${SYSTEM_OBJS} genassym.o genoffset.o genoffset_test.o
 DEPENDOBJS+=	${CLEAN:M*.o}
 DEPENDFILES=	${DEPENDOBJS:O:u:C/^/.depend./}

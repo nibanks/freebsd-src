@@ -88,6 +88,8 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <sys/eventlog.h>
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/tcp_syncache.h>
 #include <netinet/tcp_hpts.h>
 #include <netinet/tcp_ratelimit.h>
@@ -2828,6 +2830,8 @@ rack_log_rtt_sample(struct tcp_rack *rack, uint32_t rtt)
 static void
 rack_log_rtt_sample_calc(struct tcp_rack *rack, uint32_t rtt, uint32_t send_time, uint32_t ack_time, int where)
 {
+	TCP_EVENTLOG_RTT_SAMPLE_LOG(rack->rc_tp->t_eventlog_session, rtt);
+
 	if (rack_verbose_logging && tcp_bblogging_on(rack->rc_tp)) {
 		union tcp_log_stackspecific log;
 		struct timeval tv;
@@ -5413,6 +5417,21 @@ rack_ack_received(struct tcpcb *tp, struct tcp_rack *rack, uint32_t th_ack, uint
 		tp->t_ccv.flags |= CCF_USE_LOCAL_ABC;
 		CC_ALGO(tp)->ack_received(&tp->t_ccv, type);
 	}
+	if (tp->snd_cwnd != prior_cwnd)
+		TCP_EVENTLOG_CWND_LOG(tp->t_eventlog_session,
+		    tp->snd_cwnd, tp->snd_ssthresh);
+	/*
+	 * XXX rack_ack_received() does not currently have access to the
+	 * caller's SACK blocks, so we always log a plain ACK event.  Once
+	 * the rack stack threads SACK info into rack_ack_received(), this
+	 * call should switch to TCP_EVENTLOG_SACK_LOG when SACK info is
+	 * present.
+	 */
+	TCP_EVENTLOG_ACK_LOG(tp->t_eventlog_session,
+	    acked, th_ack,
+	    ctf_flight_size(rack->rc_tp, rack->r_ctl.rc_sacked),
+	    rack->r_ctl.rc_sacked, nsegs,
+	    tcp_tv_to_lusec(&rack->r_ctl.act_rcv_time));
 	if (lgb) {
 		lgb->tlb_stackinfo.u_bbr.flex6 = tp->snd_cwnd;
 	}
@@ -5476,9 +5495,8 @@ tcp_rack_partialack(struct tcpcb *tp)
 static void
 rack_exit_recovery(struct tcpcb *tp, struct tcp_rack *rack, int how)
 {
-	/*
-	 * Now exit recovery.
-	 */
+	TCP_EVENTLOG_EXIT_RECOVERY_LOG(tp->t_eventlog_session,
+	    tp->snd_cwnd, tp->snd_ssthresh);
 	EXIT_RECOVERY(tp->t_flags);
 }
 
@@ -5660,6 +5678,8 @@ rack_cong_signal(struct tcpcb *tp, uint32_t type, uint32_t ack, int line)
 		CC_ALGO(tp)->cong_signal(&tp->t_ccv, type);
 	}
 	if ((in_rec_at_entry == 0) && IN_RECOVERY(tp->t_flags)) {
+		TCP_EVENTLOG_ENTER_RECOVERY_LOG(tp->t_eventlog_session,
+		    tp->snd_cwnd, tp->snd_ssthresh);
 		rack_log_to_prr(rack, 15, cwnd_enter, line);
 		rack->r_ctl.dsack_byte_cnt = 0;
 		rack->r_ctl.retran_during_recovery = 0;
@@ -7654,6 +7674,13 @@ drop_it:
 	} else if ((tp->t_flags & TF_RCVD_TSTMP) == 0)
 		tp->t_flags &= ~TF_PREVVALID;
 	KMOD_TCPSTAT_INC(tcps_rexmttimeo);
+	TCP_EVENTLOG_RTO_LOG(tp->t_eventlog_session,
+	    tp->t_rxtshift,
+	    tp->t_rttlow,
+	    tp->t_srtt >> TCP_RTT_SHIFT,
+	    tp->t_maxseg,
+	    tp->snd_max - tp->snd_una,
+	    0);
 	if ((tp->t_state == TCPS_SYN_SENT) ||
 	    (tp->t_state == TCPS_SYN_RECEIVED))
 		rexmt = RACK_INITIAL_RTO * tcp_backoff[tp->t_rxtshift];
@@ -8660,6 +8687,13 @@ tcp_rack_xmit_timer_commit(struct tcp_rack *rack, struct tcpcb *tp)
 	RACK_TCPT_RANGESET(tp->t_rxtcur, RACK_REXMTVAL(tp),
 		      max(rack_rto_min, rtt + 2), rack_rto_max, rack->r_ctl.timer_slop);
 	rack_log_rtt_sample(rack, rtt);
+	TCP_EVENTLOG_RTT_LOG(tp->t_eventlog_session,
+	    rtt,
+	    tp->t_srtt,
+	    rack->r_ctl.rack_rs.rs_us_rtt,
+	    rack->r_ctl.rc_lowest_us_rtt,
+	    get_filter_value_small(&rack->r_ctl.rc_gp_min_rtt),
+	    rack->r_ctl.rc_gp_srtt);
 	tp->t_softerror = 0;
 }
 
@@ -12807,6 +12841,8 @@ rack_do_syn_sent(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		}
 
 		tcp_ecn_input_syn_sent(tp, thflags, iptos);
+
+		tcp_eventlog_conn_params(tp);
 
 		if (SEQ_GT(th->th_ack, tp->snd_una)) {
 			/*
@@ -23567,7 +23603,11 @@ rack_process_option(struct tcpcb *tp, struct tcp_rack *rack, int sopt_name,
 	default:
 		break;
 	}
-	tcp_log_socket_option(tp, sopt_name, optval, error);
+	if ((sopt_name == TCP_HYBRID_PACING) && (hybrid != NULL))
+		tcp_log_socket_option_blob(tp, sopt_name, hybrid,
+		    sizeof(*hybrid), error);
+	else
+		tcp_log_socket_option(tp, sopt_name, optval, error);
 	return (error);
 }
 
@@ -24693,6 +24733,12 @@ tcp_addrack(module_t mod, int32_t type, void *data)
 			goto free_uma;
 		}
 		rack_init_sysctls();
+		static const struct eventlog_provider_config tcp_eventlog_cfg = {
+			.dump_callback = tcp_eventlog_dump_state,
+			.default_changed = tcp_eventlog_default_changed,
+		};
+		__tcp_rack.tfb_eventlog_provider = eventlog_provider_create(
+		    "tcp", &tcp_eventlog_cfg);
 		num_stacks = nitems(rack_stack_names);
 		err = register_tcp_functions_as_names(&__tcp_rack, M_WAITOK,
 		    rack_stack_names, &num_stacks);
@@ -24700,6 +24746,9 @@ tcp_addrack(module_t mod, int32_t type, void *data)
 			printf("Failed to register %s stack name for "
 			    "%s module\n", rack_stack_names[num_stacks],
 			    __XSTRING(MODNAME));
+			eventlog_provider_destroy(
+			    __tcp_rack.tfb_eventlog_provider);
+			__tcp_rack.tfb_eventlog_provider = NULL;
 			sysctl_ctx_free(&rack_sysctl_ctx);
 free_uma:
 			uma_zdestroy(rack_zone);
@@ -24726,6 +24775,8 @@ free_uma:
 			rack_mod_inited = false;
 		}
 		tcp_lro_dereg_mbufq();
+		eventlog_provider_destroy(__tcp_rack.tfb_eventlog_provider);
+		__tcp_rack.tfb_eventlog_provider = NULL;
 		err = 0;
 		break;
 	default:
