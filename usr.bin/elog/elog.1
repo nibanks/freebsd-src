@@ -1,0 +1,346 @@
+.\"
+.\" Copyright (c) 2026 Netflix, Inc.
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd April 27, 2026
+.Dt ELOG 1
+.Os
+.Sh NAME
+.Nm elog
+.Nd subscribe to and read events from eventlog device
+.Sh SYNOPSIS
+.Nm
+.Op Fl b Ar size
+.Op Fl d
+.Op Fl D
+.Op Fl e
+.Op Fl f Ar type
+.Op Fl n
+.Op Fl p
+.Op Fl s
+.Op Fl t
+.Op Fl -delta-time
+.Op Fl -duration Ar seconds
+.Op Fl o Ar file | Cm dir= Ns Ar path
+.Op Fl c Ar provider Op Ar level Op Ar keywords
+.Op Fl c Ar provider Op Ar level Op Ar keywords
+.Op ...
+.Op Fl h
+.Nm
+.Fl r Ar file
+.Op Fl d
+.Op Fl e
+.Op Fl n
+.Op Fl p
+.Op Fl t
+.Op Fl -delta-time
+.Sh DESCRIPTION
+The
+.Nm
+utility subscribes to events from one or more eventlog providers and displays
+them in a formatted output on standard output or writes them to a file.
+.Pp
+The utility opens the single system-wide eventlog device at
+.Pa /dev/eventlog
+and sends subscription requests for the specified providers.
+.Pp
+The eventlog framework is host-global and is not exposed to jailed
+processes.
+The
+.Nm
+utility must be run from the host
+.Pq Va prison0 ;
+running it from inside a jail fails because
+.Xr open 2
+on
+.Pa /dev/eventlog
+returns
+.Er EPERM .
+.Pp
+The options are as follows:
+.Bl -tag -width indent
+.It Fl c Ar provider Op Ar level Op Ar keywords
+.It Fl -capture Ar provider Op Ar level Op Ar keywords
+Subscribe to events from the specified provider.
+.Bl -tag -width indent
+.It Ar provider
+The name of the eventlog provider.
+This argument is required.
+.It Ar level
+Optional log level.
+Can be specified as a case-insensitive string
+(NONE, ERROR, WARN, INFO, VERBOSE, TRACE)
+or as a numeric value (0\(en5).
+Defaults to VERBOSE if not specified.
+TRACE captures all events including internal algorithmic details.
+VERBOSE excludes TRACE-level events.
+.It Ar keywords
+Optional keyword filter.
+Can be specified as a hexadecimal mask (e.g., 0x3F) or as pipe-delimited
+keyword names (e.g., CC|RX|TX).
+Keyword names are provider-specific and case-insensitive.
+Defaults to 0xFFFFFFFF (all keywords) if not specified.
+.El
+.It Fl b Ar size
+.It Fl -buffer-size Ar size
+Set per-CPU buffer size.
+The size can be specified as bytes, or with K/M/G suffix for Kilobytes,
+Megabytes, or Gigabytes.
+Examples: 65536, 64K, 1M, 256K.
+Valid range: 4KB to 1GB per CPU.
+Default: 512KB.
+.It Fl d
+.It Fl -date
+Show the full date in timestamps.
+When enabled, timestamps are displayed in the format
+.Li YYYY-MM-DD HH:MM:SS.uuuuuu
+instead of the default
+.Li HH:MM:SS.uuuuuu .
+.It Fl D
+.It Fl -dump-state
+Request providers dump their current state when subscribing.
+This causes providers to emit initial state events (e.g., connection parameters,
+current congestion window) immediately upon subscription.
+.It Fl e
+.It Fl -event-name
+Show the event name (e.g., IN, OUT, SESSION_CREATE) in square brackets
+after the session ID in each output line.
+.It Fl n
+.It Fl -event-number
+Print a serial event number at the beginning of each output line.
+Events are numbered starting from 1.
+.It Fl o Ar file
+.It Fl -output Ar file
+Write output to the specified file in binary format.
+See
+.Xr elog 5
+for a description of the binary file format.
+Uses buffered I/O for efficiency.
+Standard output always uses formatted text.
+.It Fl o Cm dir= Ns Ar path
+Write one binary file per session under
+.Ar path .
+Each session gets its own file, named by session ID.
+The directory is created if it does not exist.
+.It Fl p
+.It Fl -providers
+Print all registered provider names to stderr at the beginning of output,
+before any events are displayed.
+.It Fl r Ar file
+.It Fl -read-binary Ar file
+Read a binary file created with
+.Fl o
+and convert it to formatted text output.
+See
+.Xr elog 5
+for a description of the binary file format.
+The binary file header includes total event count and dropped-event count.
+If the filename ends in
+.Pa .gz ,
+the file is transparently decompressed using zlib.
+This mode cannot be used with capture options.
+.It Fl s
+.It Fl -stats
+Print detailed statistics on exit, including provider count, the number
+of events received, and any dropped events.
+Statistics are printed to stderr.
+Without this flag, no statistics are printed.
+.It Fl t
+.It Fl -relative-time
+Show time relative to the first event in the trace.
+Each output line is prefixed with a relative timestamp in the format
+.Li +seconds.microseconds
+(e.g.,
+.Li +1.234567 ) .
+.It Fl -delta-time
+Show time elapsed since the previous event.
+Each output line is prefixed with a delta timestamp in the format
+.Li d Ns seconds.microseconds
+(e.g.,
+.Li d0.000015 ) .
+Can be combined with
+.Fl t .
+.It Fl -duration Ar seconds
+Self-exit after
+.Ar seconds
+seconds.
+.Nm
+raises
+.Dv SIGALRM
+internally and takes the same cleanup path as
+.Dv SIGINT
+or
+.Dv SIGTERM :
+binary output is flushed, the file header is updated with final
+event/drop counts, and per-session files are closed and renamed.
+A value of 0 disables the timer (the default), in which case
+.Nm
+runs until a signal is received.
+Intended for scripted captures, cron jobs, and similar uses
+that want a fixed recording window without relying on an external
+.Xr kill 1 .
+.It Fl h
+.It Fl -help
+Display usage information and exit.
+.El
+.Pp
+Multiple provider subscriptions can be specified by using multiple
+.Fl c
+flags.
+.Pp
+The utility reads events continuously, blocking when no data is available.
+Each formatted event is written as a single line to standard output in the
+form:
+.Bd -literal -offset indent
+[CPU]TID::TIMESTAMP [PROVIDER][SESSION_ID][EVENT_NAME] PAYLOAD
+.Ed
+.Pp
+where
+.Bl -tag -width 12n -compact
+.It Va CPU
+the CPU number that emitted the event, formatted as a 2-character right-aligned
+decimal field
+.Pq e.g. Li \&[47] .
+The field grows wider when needed; this is a minimum, not a fixed width.
+.It Va TID
+the thread id of the emitting context, formatted as at least 4 lowercase hex
+digits.
+The field grows wider when needed; this is a minimum, not a fixed width.
+.It Va TIMESTAMP
+the in-kernel emit time
+.Pq see Xr eventlog 9 ,
+formatted as
+.Li HH:MM:SS.uuuuuu
+or
+.Li YYYY-MM-DD HH:MM:SS.uuuuuu
+when
+.Fl d
+is given.
+.It Va PROVIDER
+the provider name as registered by
+.Xr eventlog 9
+.Po e.g.\&
+.Li tcp ,
+.Li hpts
+.Pc .
+.It Va SESSION_ID
+the per-provider session identifier as a decimal number
+.Pq e.g.\& a TCP per-connection inp_gencnt .
+.It Va EVENT_NAME
+.Pq optional, requires Fl e
+the event symbolic name (e.g.,
+.Li IN ,
+.Li OUT ,
+.Li SESSION_CREATE )
+in square brackets.
+Unknown event ids are printed as
+.Li \&[?<id>] .
+.It Va PAYLOAD
+provider-specific decoded fields, as
+.Li name=value
+pairs separated by spaces.
+.El
+.Pp
+When
+.Fl n , Fl t ,
+or
+.Fl -delta-time
+are enabled, their respective prefixes appear at the beginning of each line
+before the
+.Va CPU
+and
+.Va TID
+fields.
+.Pp
+Statistics are only printed when the
+.Fl s
+flag is specified.
+When enabled, statistics include the number of providers, events received,
+and any dropped events.
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Subscribe to all events from a provider at VERBOSE level with all keywords:
+.Bd -literal -offset indent
+elog -c provider
+.Ed
+.Pp
+Subscribe to a provider at INFO level with all keywords:
+.Bd -literal -offset indent
+elog -c provider INFO
+.Ed
+.Pp
+Subscribe to a provider at INFO level with specific keywords by name:
+.Bd -literal -offset indent
+elog -c provider INFO KEYWORD1|KEYWORD2
+.Ed
+.Pp
+Subscribe to a provider at INFO level with keywords as hex mask:
+.Bd -literal -offset indent
+elog -c provider INFO 0x3F
+.Ed
+.Pp
+Subscribe to a provider at TRACE level:
+.Bd -literal -offset indent
+elog -c provider TRACE
+.Ed
+.Pp
+Subscribe to multiple providers:
+.Bd -literal -offset indent
+elog -c provider1 INFO -c provider2 WARN
+.Ed
+.Pp
+Subscribe using numeric levels:
+.Bd -literal -offset indent
+elog -c provider 3 0x3F
+.Ed
+.Pp
+Set buffer size to 4MB per CPU:
+.Bd -literal -offset indent
+elog -b 4M -c provider
+.Ed
+.Pp
+Write output to a file (binary format):
+.Bd -literal -offset indent
+elog -c provider -o /tmp/events.bin
+.Ed
+.Pp
+Read binary file and convert to text:
+.Bd -literal -offset indent
+elog -r /tmp/events.bin
+.Ed
+.Pp
+Show relative timestamps from trace start:
+.Bd -literal -offset indent
+elog -t -c provider
+.Ed
+.Pp
+Show both relative and inter-event delta timestamps:
+.Bd -literal -offset indent
+elog -t --delta-time -c provider
+.Ed
+.Pp
+Write per-session files into a directory:
+.Bd -literal -offset indent
+elog -o dir=/tmp/traces -c provider
+.Ed
+.Pp
+Print statistics on exit:
+.Bd -literal -offset indent
+elog -s -c provider
+.Ed
+.Pp
+Run a fixed-duration capture, suitable for scripted use:
+.Bd -literal -offset indent
+elog --duration 30 -c provider1 -c provider2 -o /tmp/cap.elog
+.Ed
+.Sh SEE ALSO
+.Xr elog 5 ,
+.Xr eventlog 9
+.Sh HISTORY
+The
+.Nm
+utility first appeared in
+.Fx 16.0 .
+

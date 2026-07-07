@@ -74,6 +74,19 @@ NOSTDINC= -nostdinc
 
 INCLUDES= ${NOSTDINC} ${INCLMAGIC} -I. -I$S -I$S/contrib/ck/include
 
+# Generate eventlog headers via make dependencies (see conf/eventlog.mk).  The
+# find only builds the schema list that drives the dependency rules; it does
+# not generate any headers itself.  The headers are wired into the build by
+# kern.post.mk (via SRCS/OBJS_DEPEND_GUESS, like the *_if.h headers): the
+# config-generated Makefile hard-assigns BEFORE_DEPEND after this file, so
+# appending to it here would have no effect.
+EVENTLOG_SCHEMA_DIR=	${SRCTOP}/include/eventlog
+EVENTLOG_SCHEMAS!=	find ${EVENTLOG_SCHEMA_DIR} -name '*_eventlog_schema.src' -type f 2>/dev/null | ${AWK} -F/ '{print $$NF}' || echo ""
+.include "$S/conf/eventlog.mk"
+.if !empty(EVENTLOG_HEADERS)
+INCLUDES+=	${EVENTLOG_INCLUDE}
+.endif
+
 CFLAGS=	${COPTFLAGS} ${DEBUG}
 CFLAGS+= ${INCLUDES} -D_KERNEL -DHAVE_KERNEL_OPTION_HEADERS -include opt_global.h
 CFLAGS_PARAM_INLINE_UNIT_GROWTH?=100

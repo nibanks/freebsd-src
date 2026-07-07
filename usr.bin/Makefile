@@ -35,6 +35,7 @@ SUBDIR=	apply \
 	du \
 	elfctl \
 	elfdump \
+	elog \
 	enigma \
 	env \
 	etdump \
