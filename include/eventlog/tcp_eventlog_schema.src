@@ -115,6 +115,11 @@ ENUM tcp_state
     9:FIN_WAIT_2
     10:TIME_WAIT
 
+ENUM shutdown_how
+    0:SHUT_RD
+    1:SHUT_WR
+    2:SHUT_RDWR
+
 ENUM socket_option
     1:TCP_NODELAY
     2:TCP_MAXSEG
@@ -409,6 +414,12 @@ STRUCT SENDFILE
     offset:uint64_t
     length:uint64_t
     flags:uint32_t:flag_sendfile_flags
+STRUCT SHUTDOWN
+    how:uint8_t:enum_shutdown_how
+    state:uint8_t:enum_tcp_state
+    error:int32_t
+STRUCT CLOSE
+    state:uint8_t:enum_tcp_state
 STRUCT ACK
     acked:uint32_t
     snd_una:uint32_t
@@ -594,6 +605,10 @@ EVENT USER_SEND  104  INFO  TX,APP  USER_SEND
     "Application send of %6 bytes in state %3 (%4 used, %5 available in sndbuf, flags %2, error %1)"
 EVENT SENDFILE  105  INFO  TX,APP  SENDFILE
     "Sendfile %2 bytes at offset %1 (flags %3)"
+EVENT SHUTDOWN  106  INFO  APP,CONN  SHUTDOWN
+    "Shutdown %1 in state %2 (error %3)"
+EVENT CLOSE  107  INFO  APP,CONN  CLOSE
+    "Close in state %1"
 
 /* Congestion control / Window (200-299) */
 EVENT CWND  200  VERBOSE  CC  CWND
