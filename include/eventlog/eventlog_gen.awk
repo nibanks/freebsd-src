@@ -12,9 +12,11 @@
 
 function usage()
 {
-	print "usage: eventlog_gen.awk <schema.src> -h|-c";
-	print "  -h  Generate producer header (for kernel modules generating events)";
+	print "usage: eventlog_gen.awk <schema.src> [<schema.src> ...] -h|-c|-M [-o <outfile>]";
+	print "  -h  Generate producer header (for event producers)";
 	print "  -c  Generate consumer header (for userland tools consuming events)";
+	print "  -M  Generate aggregate consumer header routing across all schemas (-o required)";
+	print "  -o  Write output to <outfile> instead of a provider-derived name";
 	exit 1;
 }
 
@@ -23,6 +25,34 @@ function die(msg, what)
 	printf srcfile "(" fnr "): " > "/dev/stderr";
 	printf msg "\n", what > "/dev/stderr";
 	exit 1;
+}
+
+# Expected provider name for a schema file: the basename with the
+# _eventlog_schema.src suffix removed.  Returns "" for non-conforming names
+# (e.g. ad-hoc invocations), which are left unchecked.
+function schema_expected_provider(path,   base)
+{
+	base = path;
+	sub(/.*\//, "", base);
+	if (base !~ /_eventlog_schema\.src$/)
+		return "";
+	sub(/_eventlog_schema\.src$/, "", base);
+	return base;
+}
+
+# Generated header file names derive from the schema file name, while the
+# master routing header's #includes and the symbol prefixes derive from
+# PROVIDER.  They only resolve if they agree, so reject a mismatch here rather
+# than let it surface later as a missing generated #include.
+function check_provider_name(prov, path,   expect)
+{
+	expect = schema_expected_provider(path);
+	if (expect != "" && tolower(prov) != expect) {
+		printf "eventlog_gen.awk: %s: PROVIDER \"%s\" does not match file name; expected provider \"%s\" (from %s_eventlog_schema.src)\n", \
+		    path, prov, expect, expect > "/dev/stderr";
+		parse_error = 1;
+		exit 1;
+	}
 }
 
 function printh(s) {
@@ -74,7 +104,9 @@ BEGIN {
 	hfile = "";
 	opt_h = 0;
 	opt_c = 0;
-	mode = "";  # "producer" or "consumer"
+	opt_m = 0;
+	outfile = "";
+	mode = "";  # "producer", "consumer", or "master"
 	collecting_struct = 0;
 	collecting_enum = 0;
 	collecting_flag = 0;
@@ -82,38 +114,72 @@ BEGIN {
 	enum_line = "";
 	flag_line = "";
 	dir_created = 0;
+	parse_error = 0;
 
-	# Process command line
-	if (ARGC < 2)
-		usage();
-
-	srcfile = ARGV[1];
-	# Don't remove ARGV[1] - AWK needs it to read the file
-
-	for (i = 2; i < ARGC; i++) {
+	# Process command line.  Flags may appear in any position relative to the
+	# one or more schema files; schema files are left in ARGV for AWK to read.
+	nfiles = 0;
+	for (i = 1; i < ARGC; i++) {
 		if (ARGV[i] == "-h") {
 			opt_h = 1;
 			mode = "producer";
-			ARGV[i] = "";  # Remove from ARGV so it's not processed as a file
+			ARGV[i] = "";
 		} else if (ARGV[i] == "-c") {
 			opt_c = 1;
 			mode = "consumer";
-			ARGV[i] = "";  # Remove from ARGV so it's not processed as a file
-		} else {
+			ARGV[i] = "";
+		} else if (ARGV[i] == "-M") {
+			opt_m = 1;
+			mode = "master";
+			ARGV[i] = "";
+		} else if (ARGV[i] == "-o") {
+			ARGV[i] = "";
+			i++;
+			if (i >= ARGC)
+				usage();
+			outfile = ARGV[i];
+			ARGV[i] = "";
+		} else if (ARGV[i] ~ /^-/) {
 			usage();
+		} else {
+			# Schema file - leave in ARGV so AWK reads it
+			nfiles++;
+			if (nfiles == 1)
+				srcfile = ARGV[i];
 		}
 	}
 
-	# Exactly one mode must be specified
-	if (!opt_h && !opt_c)
+	# Exactly one mode and at least one schema file are required
+	if (opt_h + opt_c + opt_m != 1)
 		usage();
-	if (opt_h && opt_c)
+	if (nfiles < 1)
+		usage();
+	# Master mode writes a fixed aggregate header, so -o is required
+	if (mode == "master" && outfile == "")
 		usage();
 
 	# Determine output file name (will be set in END after PROVIDER is parsed)
 	# hfile is initialized above and will be set in END block
 
 	# Generate header file header (will be done in END after provider is known)
+}
+
+# Master mode: collect the provider name from each schema and skip all other
+# parsing.  The aggregate routing header is emitted in END.
+mode == "master" {
+	if ($0 ~ /^[ \t]*PROVIDER/ && !(FILENAME in master_seen)) {
+		mline = $0;
+		sub(/^[ \t]+/, "", mline);
+		gsub(/[ \t]+/, " ", mline);
+		mn = split(mline, mf, " ");
+		if (mn >= 2) {
+			check_provider_name(mf[2], FILENAME);
+			master_n++;
+			master_providers[master_n] = tolower(mf[2]);
+			master_seen[FILENAME] = 1;
+		}
+	}
+	next;
 }
 
 /^[ \t]*PROVIDER/ {
@@ -132,11 +198,14 @@ BEGIN {
 	}
 
 	provider = $2;
+	check_provider_name(provider, FILENAME);
 	# Convert to lowercase for filename
 	provider_lower = tolower(provider);
-	# Output to outdir if provided, otherwise current directory
-	# Filename depends on mode (producer vs consumer)
-	if (outdir != "") {
+	# An explicit -o output path wins; otherwise derive the name from the
+	# provider (and optional outdir).  Filename depends on producer/consumer.
+	if (outfile != "") {
+		hfile = outfile;
+	} else if (outdir != "") {
 		if (mode == "consumer") {
 			hfile = outdir "/" provider_lower "_eventlog_consumer.h";
 		} else {
@@ -706,7 +775,96 @@ function get_printf_format(field_type, enum_type, flag_type, hex_format)
 	return "%u";
 }
 
+# Emit the aggregate consumer header that routes by provider name across all
+# schemas seen in master mode.  Output goes to the -o file (hfile).
+function gen_master(   i, j, tmp, p)
+{
+	hfile = outfile;
+
+	# Sort provider names for deterministic output.
+	for (i = 1; i <= master_n; i++) {
+		for (j = i + 1; j <= master_n; j++) {
+			if (master_providers[j] < master_providers[i]) {
+				tmp = master_providers[i];
+				master_providers[i] = master_providers[j];
+				master_providers[j] = tmp;
+			}
+		}
+	}
+
+	printh("/* Auto-generated consumer header - includes all provider consumer headers */");
+	printh("#ifndef _EVENTLOG_CONSUMER_H_");
+	printh("#define _EVENTLOG_CONSUMER_H_");
+	printh("");
+	printh("#include <sys/eventlog.h>");
+	for (i = 1; i <= master_n; i++)
+		printh("#include \"" master_providers[i] "_eventlog_consumer.h\"");
+	printh("");
+	printh("/* Check if event is SESSION_END (fixed ID, all providers). Include sys/eventlog.h for EVENTLOG_SESSION_END_ID. */");
+	printh("static inline bool");
+	printh("eventlog_is_session_end(const char *provider_name, uint32_t event_id)");
+	printh("{");
+	printh("\t(void)provider_name;");
+	printh("\treturn event_id == EVENTLOG_SESSION_END_ID;");
+	printh("}");
+	printh("");
+	printh("/* Master formatting function that routes to per-provider formatters */");
+	printh("static inline int");
+	printh("eventlog_format_payload(const char *provider_name, const void *payload, size_t payload_size, uint32_t event_id, char *buf, size_t bufsize)");
+	printh("{");
+	for (i = 1; i <= master_n; i++) {
+		p = master_providers[i];
+		printh("\tif (strcmp(provider_name, \"" p "\") == 0)");
+		printh("\t\treturn " p "_eventlog_format_payload(payload, payload_size, event_id, buf, bufsize);");
+	}
+	printh("\treturn snprintf(buf, bufsize, \"[UNKNOWN_PROVIDER:%s]\", provider_name);");
+	printh("}");
+	printh("");
+	printh("/* Master event ID to name lookup (routes to per-provider lookups) */");
+	printh("static inline const char *");
+	printh("eventlog_event_id_to_name(const char *provider_name, uint32_t event_id)");
+	printh("{");
+	printh("\tif (event_id == EVENTLOG_SESSION_END_ID)");
+	printh("\t\treturn \"SESSION_END\";");
+	for (i = 1; i <= master_n; i++) {
+		p = master_providers[i];
+		printh("\tif (strcmp(provider_name, \"" p "\") == 0)");
+		printh("\t\treturn " p "_eventlog_event_id_to_name(event_id);");
+	}
+	printh("\treturn NULL;");
+	printh("}");
+	printh("");
+	printh("/* Master keyword name to bitmask lookup (routes to per-provider lookups) */");
+	printh("static inline uint32_t");
+	printh("eventlog_keyword_from_string(const char *provider_name, const char *name)");
+	printh("{");
+	for (i = 1; i <= master_n; i++) {
+		p = master_providers[i];
+		printh("\tif (strcmp(provider_name, \"" p "\") == 0)");
+		printh("\t\treturn " p "_eventlog_keyword_from_string(name);");
+	}
+	printh("\treturn (0);");
+	printh("}");
+	printh("");
+	printh("#endif /* _EVENTLOG_CONSUMER_H_ */");
+}
+
 END {
+	# A fatal parse error (e.g. provider/file-name mismatch) set parse_error
+	# and exited mid-rule; awk still runs END, so bail before producing any
+	# output.  The bare exit preserves the status already set by exit 1.
+	if (parse_error)
+		exit;
+
+	# Master mode: emit the aggregate routing header and stop.  Guard on
+	# outfile so a usage() exit from BEGIN doesn't fall through to writing an
+	# empty filename; bare exit preserves any status already set by BEGIN.
+	if (mode == "master") {
+		if (outfile != "")
+			gen_master();
+		exit;
+	}
+
 	# Process any remaining collected STRUCT
 	if (collecting_struct == 1 && struct_line != "") {
 		finalize_struct(struct_line);
@@ -847,6 +1005,9 @@ END {
 		events[nevents, "format"] = "Session ended";
 	}
 
+	if (hfile == "" && outfile != "") {
+		hfile = outfile;
+	}
 	if (hfile == "") {
 		provider_lower = tolower(provider);
 		# If outdir was provided via -v outdir=..., use it
@@ -865,12 +1026,15 @@ END {
 		}
 	}
 
-	# Generate header file header
+	# Generate header file header.  Use the schema basename (not its full
+	# path) so output is independent of where the generator is invoked from.
 	generated = "@" "generated";
+	srcbase = srcfile;
+	sub(/.*\//, "", srcbase);
 	printh("/*");
 	printh(" * THIS FILE AUTOMATICALLY GENERATED.  DO NOT EDIT.");
 	printh(" *");
-	printh(" * Generated from " srcfile);
+	printh(" * Generated from " srcbase);
 	printh(" * by eventlog_gen.awk");
 	printh(" */");
 	printh("");
