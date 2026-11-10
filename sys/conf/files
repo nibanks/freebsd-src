@@ -3923,6 +3923,7 @@ kern/kern_et.c			standard
 kern/kern_event.c		standard
 kern/kern_eventlog.c		standard
 kern/kern_symbols_eventlog.c	standard
+kern/kern_process_eventlog.c	standard
 kern/kern_exec.c		standard
 kern/kern_exit.c		standard
 kern/kern_fail.c		standard

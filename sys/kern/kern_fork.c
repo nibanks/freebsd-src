@@ -43,6 +43,7 @@
 #include <sys/bitstring.h>
 #include <sys/capsicum.h>
 #include <sys/eventhandler.h>
+#include <sys/eventlog_process.h>
 #include <sys/exterrvar.h>
 #include <sys/fcntl.h>
 #include <sys/filedesc.h>
@@ -1243,6 +1244,11 @@ fork_exit(void (*callout)(void *, struct trapframe *), void *arg,
 	 * initproc has its own fork handler, but it does return.
 	 */
 	KASSERT(callout != NULL, ("NULL callout in fork_exit"));
+
+	PROCESS_EVENTLOG_THREAD_CREATE_LOG(proc_elog_session,
+	    (uint32_t)td->td_tid, (uint32_t)td->td_proc->p_pid,
+	    td->td_proc->p_comm, td->td_name);
+
 	callout(arg, frame);
 
 	/*

@@ -42,6 +42,7 @@
 #include <sys/acct.h>		/* for acct_process() function prototype */
 #include <sys/capsicum.h>
 #include <sys/eventhandler.h>
+#include <sys/eventlog_process.h>
 #include <sys/exterrvar.h>
 #include <sys/filedesc.h>
 #include <sys/jail.h>
@@ -765,6 +766,15 @@ exit1(struct thread *td, int rval, int signo)
 	PROC_STATLOCK(p);
 	ruadd(&p->p_ru, &p->p_rux, &p->p_stats->p_cru, &p->p_crux);
 	PROC_STATUNLOCK(p);
+
+	/*
+	 * Emit PROC_EXIT once the process is actually PRS_ZOMBIE, so it
+	 * lands after every other thread's THREAD_EXIT instead of before
+	 * all of them, as it did at the old call site right after entering
+	 * exit1(). thread_exit() below never returns for the last thread,
+	 * so this is the latest point in exit1() this can run from.
+	 */
+	PROCESS_EVENTLOG_PROC_EXIT_LOG(proc_elog_session, (uint32_t)p->p_pid);
 
 	/*
 	 * Make sure the scheduler takes this thread out of its tables etc.

@@ -39,6 +39,7 @@
 #include <sys/compressor.h>
 #include <sys/dirent.h>
 #include <sys/eventhandler.h>
+#include <sys/eventlog_process.h>
 #include <sys/exec.h>
 #include <sys/fcntl.h>
 #include <sys/filedesc.h>
@@ -1066,6 +1067,12 @@ interpret:
 	VOP_UPDATE_ATIME(imgp->vp, NULL);
 
 	SDT_PROBE1(proc, , , exec__success, args->fname);
+
+	PROCESS_EVENTLOG_PROC_EXEC_LOG(proc_elog_session, (uint32_t)p->p_pid,
+	    (p->p_pptr != NULL) ? (uint32_t)p->p_pptr->p_pid : 0,
+	    (p->p_stats != NULL) ? (uint64_t)p->p_stats->p_start.tv_sec : 0,
+	    p->p_comm);
+	proc_elog_walk_vmmap(proc_elog_session, p);
 
 exec_fail_dealloc:
 	if (error != 0) {

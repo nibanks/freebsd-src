@@ -58,6 +58,8 @@
 #include <sys/umtxvar.h>
 #include <sys/vmmeter.h>
 #include <sys/cpuset.h>
+#include <sys/eventlog_process.h>
+#include <eventlog/process_eventlog.h>
 #ifdef	HWPMC_HOOKS
 #include <sys/pmckern.h>
 #endif
@@ -952,6 +954,9 @@ thread_exit(void)
 	SDT_PROBE0(proc, , , lwp__exit);
 	KASSERT(TAILQ_EMPTY(&td->td_sigqueue.sq_list), ("signal pending"));
 	MPASS(td->td_realucred == td->td_ucred);
+
+	PROCESS_EVENTLOG_THREAD_EXIT_LOG(proc_elog_session,
+	    (uint32_t)td->td_tid);
 
 	/*
 	 * drop FPU & debug register state storage, or any other

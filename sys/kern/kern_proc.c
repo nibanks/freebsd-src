@@ -77,6 +77,7 @@
 #include <sys/user.h>
 #include <sys/vnode.h>
 #include <sys/wait.h>
+#include <sys/eventlog_process.h>
 #ifdef KTRACE
 #include <sys/ktrace.h>
 #endif
@@ -2143,6 +2144,8 @@ sysctl_kern_proc_args(SYSCTL_HANDLER_ARGS)
 	struct pargs *newpa, *pa;
 	struct proc *p;
 	struct sbuf sb;
+	char title[sizeof(((struct process_eventlog_proc_title *)0)->title)];
+	u_int n;
 	int flags, error = 0, error2;
 	pid_t pid;
 
@@ -2210,10 +2213,23 @@ sysctl_kern_proc_args(SYSCTL_HANDLER_ARGS)
 			return (error);
 		}
 	}
+	/*
+	 * Copy before publishing newpa. A second setproctitle can drop
+	 * it as soon as the proc lock is released.
+	 */
+	title[0] = '\0';
+	if (newpa != NULL && newpa->ar_length > 0) {
+		n = newpa->ar_length;
+		if (n >= sizeof(title))
+			n = sizeof(title) - 1;
+		memcpy(title, newpa->ar_args, n);
+		title[n] = '\0';
+	}
 	PROC_LOCK(p);
 	pa = p->p_args;
 	p->p_args = newpa;
 	PROC_UNLOCK(p);
+	PROCESS_EVENTLOG_PROC_TITLE_LOG(proc_elog_session, (uint32_t)pid, title);
 	pargs_drop(pa);
 	return (0);
 }
