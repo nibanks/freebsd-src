@@ -11,6 +11,8 @@ SRCS+=	opt_inet.h opt_inet6.h opt_ipsec.h
 SRCS+=	opt_kern_tls.h
 SRCS+=	opt_ratelimit.h
 
+EVENTLOG_SCHEMA=	tcp_eventlog_schema.src
+
 #
 # Enable full debugging
 #

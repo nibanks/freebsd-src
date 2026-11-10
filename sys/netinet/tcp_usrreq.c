@@ -47,6 +47,7 @@
 #include <sys/limits.h>
 #include <sys/malloc.h>
 #include <sys/refcount.h>
+#include <sys/hash.h>
 #include <sys/kernel.h>
 #include <sys/ktls.h>
 #include <sys/qmath.h>
@@ -92,6 +93,8 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <eventlog/tcp_eventlog.h>
+#include <netinet/tcp_hpts.h>
 #include <netinet/tcpip.h>
 #include <netinet/cc/cc.h>
 #include <netinet/tcp_fastopen.h>
@@ -177,6 +180,12 @@ tcp_usr_attach(struct socket *so, int proto, struct thread *td)
 		goto out;
 	}
 	tp->t_state = TCPS_CLOSED;
+	/*
+	 * Record the PID of the process that opened this socket so the
+	 * connection's eventlog can identify the owning application.
+	 */
+	if (td != NULL && td->td_proc != NULL)
+		tp->t_owning_pid = td->td_proc->p_pid;
 	tcp_bblog_pru(tp, PRU_ATTACH, error);
 	INP_WUNLOCK(inp);
 	TCPSTATES_INC(TCPS_CLOSED);
@@ -816,8 +825,11 @@ tcp_usr_shutdown(struct socket *so, enum shutdown_how how)
 
 		socantsendmore(so);
 		NET_EPOCH_ENTER(et);
+		uint8_t pre_state = tp->t_state;
 		tcp_usrclosed(tp);
 		error = tcp_output_nodrop(tp);
+		TCP_EVENTLOG_SHUTDOWN_LOG(tp->t_eventlog_session,
+		    how, pre_state, error);
 		tcp_bblog_pru(tp, PRU_SHUTDOWN, error);
 		TCP_PROBE2(debug__user, tp, PRU_SHUTDOWN);
 		error = tcp_unlock_or_drop(tp, error);
@@ -884,6 +896,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	struct epoch_tracker et;
 	struct inpcb *inp = sotoinpcb(so);
 	struct tcpcb *tp = intotcpcb(inp);
+	u_int appended = 0;
 #ifdef INET
 #ifdef INET6
 	struct sockaddr_in sin;
@@ -1024,6 +1037,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	if (!(flags & PRUS_OOB)) {
 		if (tp->t_acktime == 0)
 			tp->t_acktime = ticks;
+		appended = m_length(m, NULL);
 		sbappendstream(&so->so_snd, m, flags);
 		m = NULL;
 		if (nam && tp->t_state < TCPS_SYN_SENT) {
@@ -1110,6 +1124,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 		 */
 		if (tp->t_acktime == 0)
 			tp->t_acktime = ticks;
+		appended = m_length(m, NULL);
 		sbappendstream_locked(&so->so_snd, m, flags);
 		SOCK_SENDBUF_UNLOCK(so);
 		m = NULL;
@@ -1163,6 +1178,9 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	    &inp->inp_socket->so_snd,
 	    TCP_LOG_USERSEND, error,
 	    0, NULL, false);
+	TCP_EVENTLOG_USER_SEND_LOG(tp->t_eventlog_session,
+	    error, flags, tp->t_state,
+	    sbused(&so->so_snd), sbavail(&so->so_snd), appended);
 
 out:
 	/*
@@ -1265,6 +1283,7 @@ tcp_usr_close(struct socket *so)
 	 */
 	NET_EPOCH_ENTER(et);
 	INP_WLOCK(inp);
+	TCP_EVENTLOG_CLOSE_LOG(tp->t_eventlog_session, tp->t_state);
 	if (!(tp->t_flags & TF_DISCONNECTED)) {
 		if (tp->t_state != TCPS_TIME_WAIT) {
 			tp->t_flags |= TF_CLOSED;
@@ -1429,6 +1448,14 @@ tcp_connect(struct tcpcb *tp, struct sockaddr_in *sin, struct thread *td)
 	if (error != 0)
 		return (error);
 
+	if (inp->inp_vflag & INP_IPV4) {
+		TCP_EVENTLOG_CONN_SET_IP_V4_LOG(tp->t_eventlog_session,
+		    inp->inp_laddr,
+		    inp->inp_lport,
+		    inp->inp_faddr,
+		    inp->inp_fport);
+	}
+
 	/* set the hash on the connection */
 	rss_proto_software_hash_v4(inp->inp_faddr, inp->inp_laddr,
 	    inp->inp_fport, inp->inp_lport, IPPROTO_TCP,
@@ -1475,6 +1502,14 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr_in6 *sin6, struct thread *td)
 	error = in6_pcbconnect(inp, sin6, td->td_ucred, true);
 	if (error != 0)
 		return (error);
+
+	if (inp->inp_vflag & INP_IPV6) {
+		TCP_EVENTLOG_CONN_SET_IP_V6_LOG(tp->t_eventlog_session,
+		    inp->inp_inc.inc6_laddr,
+		    inp->inp_lport,
+		    inp->inp_inc.inc6_faddr,
+		    inp->inp_fport);
+	}
 
 	/* set the hash on the connection */
 	rss_proto_software_hash_v6(&inp->in6p_faddr,
@@ -1753,6 +1788,7 @@ tcp_ctloutput_set(struct inpcb *inp, struct sockopt *sopt)
 		 */
 		tp->t_fb = blk;
 		tp->t_fb_ptr = ptr;
+		tcp_ensure_eventlog_session_on_switch(tp, blk);
 #ifdef TCP_OFFLOAD
 		if (tp->t_flags & TF_TOE) {
 			tcp_offload_ctloutput(tp, sopt->sopt_dir,
@@ -1946,6 +1982,8 @@ no_mem_needed:
 		memcpy(&tp->t_ccv, &cc_mem, sizeof(struct cc_var));
 		/* Now attach the new, which takes a reference */
 		cc_attach(tp, algo);
+		TCP_EVENTLOG_CC_ALGO_CHANGE_LOG(tp->t_eventlog_session,
+		    algo->name);
 		/* Ok now are we where we have gotten past any conn_init? */
 		if (TCPS_HAVEESTABLISHED(tp->t_state) && (CC_ALGO(tp)->conn_init != NULL)) {
 			/* Yep run the connection init for the new CC */
@@ -2342,6 +2380,58 @@ unlock_and_done:
 			goto unlock_and_done;
 		}
 
+		case TCP_EVENTLOG:
+			INP_WUNLOCK(inp);
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error)
+				return (error);
+			INP_WLOCK_RECHECK(inp);
+			if (optval)
+				tp->t_flags2 |= TF2_EVENTLOG_ENABLED;
+			else
+				tp->t_flags2 &= ~TF2_EVENTLOG_ENABLED;
+			eventlog_session_set_enabled(
+			    tp->t_eventlog_session, optval);
+			if (optval)
+				tcp_eventlog_dump_session(tp,
+				    tcp_log_id_str(tp));
+			goto unlock_and_done;
+
+		case TCP_EVENTLOG_RATIO: {
+			const char *id;
+
+			INP_WUNLOCK(inp);
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error)
+				return (error);
+			INP_WLOCK_RECHECK(inp);
+			/*
+			 * Enable the eventlog for ~1-in-optval log IDs, using
+			 * the same hash, seed (0) and threshold as
+			 * tcp_log_apply_ratio() so elog_ratio and bb_ratio
+			 * co-select the identical set (a deliberate value
+			 * match, not a code dependency). No pbcid => not a
+			 * log-ID session, so a no-op.
+			 */
+			id = tcp_log_id_str(tp);
+			if (optval <= 0 || id == NULL || *id == '\0')
+				goto unlock_and_done;
+			if (tp->t_eventlog_session == NULL) {
+				error = ENOENT;
+				goto unlock_and_done;
+			}
+			if (hash32_buf(id, strlen(id), 0) <=
+			    max(1, UINT32_MAX / optval)) {
+				tp->t_flags2 |= TF2_EVENTLOG_ENABLED;
+				eventlog_session_set_enabled(
+				    tp->t_eventlog_session, 1);
+				tcp_eventlog_dump_session(tp, id);
+			}
+			goto unlock_and_done;
+		}
+
 #ifdef TCP_BLACKBOX
 		case TCP_LOG:
 			INP_WUNLOCK(inp);
@@ -2525,6 +2615,28 @@ unhold:
 			INP_WUNLOCK(inp);
 			error = sooptcopyout(sopt, &optval, sizeof optval);
 			break;
+		case TCP_EVENTLOG:
+			if (tp->t_eventlog_session != NULL)
+				optval = eventlog_session_is_enabled(
+				    tp->t_eventlog_session);
+			else
+				optval = (tp->t_flags2 &
+				    TF2_EVENTLOG_ENABLED) ? 1 : 0;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof(optval));
+			break;
+		case TCP_EVENTLOG_INFO: {
+			struct tcp_eventlog_info tei;
+
+			bzero(&tei, sizeof(tei));
+			tei.session_id = inp->inp_gencnt;
+			if (tp->t_eventlog_session != NULL)
+				tei.enabled = eventlog_session_is_enabled(
+				    tp->t_eventlog_session);
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &tei, sizeof(tei));
+			break;
+		}
 #ifdef TCP_BLACKBOX
 		case TCP_LOG:
 			optval = tcp_get_bblog_state(tp);

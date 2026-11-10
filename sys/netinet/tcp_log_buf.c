@@ -994,6 +994,9 @@ refind:
 		SLIST_INSERT_HEAD(&tlb->tlb_head, tln, tln_list);
 		tp->t_lib = tlb;
 		tp->t_lin = tln;
+
+		tcp_eventlog_on_log_id_set(tp, tlb->tlb_id);
+
 		if (tp->t_lib->tlb_logstate > TCP_LOG_STATE_OFF) {
 			/* Clone in any logging */
 

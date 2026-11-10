@@ -102,6 +102,15 @@
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_ecn.h>
 #include <netinet/tcp_log_buf.h>
+/*
+ * Compile the tcp decode blob into this TU.  Each "tcp" provider registration
+ * site carries its own private copy (see <eventlog/tcp_eventlog.h>) - the RACK
+ * and ngen stack modules do the same - so the schema_id a site registers always
+ * describes the events it emits, even when a stack module is built out of band
+ * against a different schema than the running kernel.
+ */
+#define	TCP_EVENTLOG_DEFINE_DECODE_BLOB
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/tcp_syncache.h>
 #include <netinet/tcp_hpts.h>
 #include <netinet/tcp_lro.h>
@@ -255,6 +264,14 @@ SYSCTL_COUNTER_U64(_net_inet_tcp, OID_AUTO, dgp_failures, CTLFLAG_RD,
 static int	tcp_log_debug = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, log_debug, CTLFLAG_RW,
     &tcp_log_debug, 0, "Log errors caused by incoming TCP segments");
+
+SYSCTL_NODE(_net_inet_tcp, OID_AUTO, eventlog, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "TCP eventlog controls");
+
+static int tcp_eventlog_log_id_limit = 0;
+SYSCTL_INT(_net_inet_tcp_eventlog, OID_AUTO, log_id_limit, CTLFLAG_RW,
+    &tcp_eventlog_log_id_limit, 0,
+    "Max eventlog sessions to create for Log ID buckets (-1=unlimited, 0=none); decrements as used");
 
 /*
  * Target size of TCP PCB hash tables. Must be a power of two.
@@ -492,6 +509,468 @@ find_and_ref_tcp_default_fb(void)
 	return (rblk);
 }
 
+/* Eventlog SAMPLE plumbing: callout-driven aggregates, subscriber-gated. */
+#define	TCP_EVENTLOG_SAMPLE_PERIOD_US_MIN	1000		/* 1 ms */
+#define	TCP_EVENTLOG_SAMPLE_PERIOD_US_MAX	1800000000U	/* 30 min (uint32 wrap safety) */
+
+uint32_t tcp_eventlog_sample_period_us = 500000;	/* 2 Hz */
+static struct callout tcp_eventlog_sample_callout;
+static struct mtx tcp_eventlog_sample_mtx;
+static bool tcp_eventlog_sampler_armed;
+
+/*
+ * True if f is the first t_functions entry for its function block — the
+ * representative alias.  Lets per-stack events fire once per stack even when a
+ * stack is registered under several names.  Caller holds tcp_function_lock.
+ */
+static bool
+tcp_eventlog_fb_is_primary_alias(struct tcp_function *f)
+{
+	struct tcp_function *g;
+
+	TAILQ_FOREACH(g, &t_functions, tf_next) {
+		if (g == f)
+			return (true);
+		if (g->tf_fb == f->tf_fb)
+			return (false);
+	}
+	return (true);
+}
+
+static void
+tcp_eventlog_sample_tick(void *arg __unused)
+{
+	VNET_ITERATOR_DECL(vnet_iter);
+	uint64_t states[TCP_NSTATES] = {0};
+	int i;
+#ifdef TCP_REQUEST_TRK
+	struct tcp_function *f;
+#endif
+
+	mtx_assert(&tcp_eventlog_sample_mtx, MA_OWNED);
+
+	if (TCP_EVENTLOG_TCP_SAMPLE_ENABLED(tcp_eventlog_session_aggregate)) {
+		VNET_LIST_RLOCK_NOSLEEP();
+		VNET_FOREACH(vnet_iter) {
+			CURVNET_SET(vnet_iter);
+			for (i = 0; i < TCP_NSTATES; i++)
+				states[i] += counter_u64_fetch(
+				    V_tcps_states[i]);
+			CURVNET_RESTORE();
+		}
+		VNET_LIST_RUNLOCK_NOSLEEP();
+
+		TCP_EVENTLOG_TCP_SAMPLE_LOG_ALWAYS(
+		    tcp_eventlog_session_aggregate,
+		    states[TCPS_CLOSED], states[TCPS_LISTEN],
+		    states[TCPS_SYN_SENT], states[TCPS_SYN_RECEIVED],
+		    states[TCPS_ESTABLISHED], states[TCPS_CLOSE_WAIT],
+		    states[TCPS_FIN_WAIT_1], states[TCPS_CLOSING],
+		    states[TCPS_LAST_ACK], states[TCPS_FIN_WAIT_2],
+		    states[TCPS_TIME_WAIT]);
+	}
+
+#ifdef TCP_REQUEST_TRK
+	/*
+	 * TCP_RPS_SAMPLE shares TCP_SAMPLE's callout and cadence but is emitted
+	 * per stack: each stack publishes its own cumulative request count on
+	 * its own session, so consumers can break RPS out by stack (demuxed via
+	 * TCP_STACK_INFO).  Dedupe aliased names by tf_fb.  Skip ticks where
+	 * the count is unchanged; dump_state replays the current value for
+	 * late subscribers so a suppressed plateau is not lost.
+	 */
+	rw_rlock(&tcp_function_lock);
+	TAILQ_FOREACH(f, &t_functions, tf_next) {
+		struct tcp_function_block *blk = f->tf_fb;
+		uint64_t req_count;
+
+		if (!tcp_eventlog_fb_is_primary_alias(f))
+			continue;
+		req_count = atomic_load_64(&blk->tfb_req_count);
+		if (req_count == blk->tfb_req_count_last)
+			continue;
+		TCP_EVENTLOG_TCP_RPS_SAMPLE_LOG(
+		    blk->tfb_eventlog_session_global, req_count);
+		blk->tfb_req_count_last = req_count;
+	}
+	rw_runlock(&tcp_function_lock);
+#endif
+
+	if (tcp_eventlog_sampler_armed)
+		callout_reset_sbt(&tcp_eventlog_sample_callout,
+		    ustosbt(tcp_eventlog_sample_period_us), 0,
+		    tcp_eventlog_sample_tick, NULL, C_PREL(2));
+}
+
+static void
+tcp_eventlog_subscribers_changed(struct eventlog_provider *provider __unused,
+    bool has_subscribers, void *arg __unused)
+{
+	if (has_subscribers) {
+		mtx_lock(&tcp_eventlog_sample_mtx);
+		if (tcp_eventlog_sampler_armed) {
+			mtx_unlock(&tcp_eventlog_sample_mtx);
+			return;
+		}
+		tcp_eventlog_sampler_armed = true;
+		callout_reset_sbt(&tcp_eventlog_sample_callout,
+		    ustosbt(tcp_eventlog_sample_period_us), 0,
+		    tcp_eventlog_sample_tick, NULL, C_PREL(2));
+		mtx_unlock(&tcp_eventlog_sample_mtx);
+	} else {
+		mtx_lock(&tcp_eventlog_sample_mtx);
+		if (!tcp_eventlog_sampler_armed) {
+			mtx_unlock(&tcp_eventlog_sample_mtx);
+			return;
+		}
+		tcp_eventlog_sampler_armed = false;
+		mtx_unlock(&tcp_eventlog_sample_mtx);
+		callout_drain(&tcp_eventlog_sample_callout);
+		/*
+		 * subscribers_changed is not serialized by the framework: a
+		 * concurrent arm can re-set the flag and reschedule the callout
+		 * in the window between the unlock and the drain, which drain
+		 * then cancels.  Re-arm if the flag is set again so the sampler
+		 * matches the latched state.
+		 */
+		mtx_lock(&tcp_eventlog_sample_mtx);
+		if (tcp_eventlog_sampler_armed)
+			callout_reset_sbt(&tcp_eventlog_sample_callout,
+			    ustosbt(tcp_eventlog_sample_period_us), 0,
+			    tcp_eventlog_sample_tick, NULL, C_PREL(2));
+		mtx_unlock(&tcp_eventlog_sample_mtx);
+	}
+}
+
+static int
+tcp_eventlog_sample_period_us_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	struct tcp_function *f;
+	uint32_t new_us;
+	int error;
+
+	new_us = tcp_eventlog_sample_period_us;
+	error = sysctl_handle_int(oidp, &new_us, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	if (new_us < TCP_EVENTLOG_SAMPLE_PERIOD_US_MIN ||
+	    new_us > TCP_EVENTLOG_SAMPLE_PERIOD_US_MAX)
+		return (EINVAL);
+
+	/* Plain store: the u32 write is atomic and the callout re-reads on re-arm. */
+	tcp_eventlog_sample_period_us = new_us;
+
+	/* Replay TCP_STACK_INFO once per stack (dedupe aliases by tf_fb). */
+	rw_rlock(&tcp_function_lock);
+	TAILQ_FOREACH(f, &t_functions, tf_next) {
+		struct tcp_function_block *blk = f->tf_fb;
+
+		if (!tcp_eventlog_fb_is_primary_alias(f))
+			continue;
+		TCP_EVENTLOG_TCP_STACK_INFO_LOG(
+		    blk->tfb_eventlog_session_global,
+		    blk->tfb_tcp_block_name,
+		    new_us);
+	}
+	rw_runlock(&tcp_function_lock);
+
+	return (0);
+}
+
+void
+tcp_eventlog_default_changed(struct eventlog_provider *provider __unused,
+    int value, void *arg __unused)
+{
+	VNET_ITERATOR_DECL(vnet_iter);
+	struct inpcb *inp;
+	int enabled;
+
+	if (value != -1 && value != 2)
+		return;
+
+	enabled = (value == 2) ? 1 : 0;
+
+	VNET_LIST_RLOCK();
+	VNET_FOREACH(vnet_iter) {
+		CURVNET_SET(vnet_iter);
+		struct inpcb_iterator inpi = INP_ALL_ITERATOR(&V_tcbinfo,
+		    INPLOOKUP_RLOCKPCB);
+
+		while ((inp = inp_next(&inpi)) != NULL) {
+			struct tcpcb *tp = intotcpcb(inp);
+			if (tp->t_eventlog_session == NULL)
+				continue;
+			if (enabled &&
+			    !eventlog_session_is_enabled(
+			    tp->t_eventlog_session)) {
+				eventlog_session_set_enabled(
+				    tp->t_eventlog_session, 1);
+				tcp_eventlog_dump_session(tp,
+				    tcp_log_id_str(tp));
+			} else if (!enabled) {
+				eventlog_session_set_enabled(
+				    tp->t_eventlog_session, 0);
+			}
+		}
+		CURVNET_RESTORE();
+	}
+	VNET_LIST_RUNLOCK();
+}
+
+static void tcp_eventlog_dump_session_state(struct tcpcb *tp,
+    const char *log_id, bool emit_session_create);
+
+/*
+ * Handle eventlog session when switching TCP stacks.
+ * - If switching to a stack with a provider but we have no session: create one.
+ *   If the user previously set TCP_EVENTLOG (TF2_EVENTLOG_ENABLED), honor it.
+ * - If switching to a stack without a provider but we have a session: destroy it.
+ * - If switching between two stacks with providers: migrate to a session
+ *   under the new stack's provider.
+ * Caller must hold inp lock.
+ */
+void
+tcp_ensure_eventlog_session_on_switch(struct tcpcb *tp,
+    struct tcp_function_block *tfb)
+{
+	struct tcp_eventlog_session_create create_payload;
+	int created_enabled;
+
+	INP_WLOCK_ASSERT(tptoinpcb(tp));
+	if (tfb->tfb_eventlog_provider != NULL) {
+		if (tp->t_eventlog_session != NULL) {
+			/* Mid-connection swap between two eventlog stacks */
+			TCP_EVENTLOG_TCP_STACK_CHANGE_LOG(
+			    tp->t_eventlog_session,
+			    tfb->tfb_tcp_block_name);
+			eventlog_session_destroy(tp->t_eventlog_session);
+			tp->t_eventlog_session = NULL;
+		}
+		create_payload.tp = tp;
+		tp->t_eventlog_session = eventlog_session_create(
+		    tfb->tfb_eventlog_provider,
+		    tptoinpcb(tp)->inp_gencnt,
+		    false,
+		    &create_payload,
+		    sizeof(create_payload));
+		created_enabled = eventlog_session_is_enabled(
+		    tp->t_eventlog_session);
+		if (tp->t_flags2 & TF2_EVENTLOG_ENABLED)
+			eventlog_session_set_enabled(
+			    tp->t_eventlog_session, 1);
+		if (eventlog_session_is_enabled(tp->t_eventlog_session)) {
+			/*
+			 * create() already wrote SESSION_CREATE when it
+			 * enabled the session; dump it only if we enabled
+			 * after the fact.
+			 */
+			tcp_eventlog_dump_session_state(tp,
+			    tcp_log_id_str(tp), !created_enabled);
+		}
+	} else {
+		/* Switching to stack without provider: end session if we have one */
+		if (tp->t_eventlog_session != NULL)
+			TCP_EVENTLOG_TCP_STACK_CHANGE_LOG(
+			    tp->t_eventlog_session,
+			    tfb->tfb_tcp_block_name);
+		eventlog_session_destroy(tp->t_eventlog_session);
+		tp->t_eventlog_session = NULL;
+	}
+}
+
+/*
+ * Emit a CONN_PARAMS_V2 event derived entirely from tp.  Callers must invoke
+ * this only after the handshake has settled the negotiated parameters
+ * (window scales, MSS, ECN/SACK/etc).  Reads the negotiated receive window
+ * scale from tp->request_r_scale (not tp->rcv_scale): the passive-open path
+ * emits before tp->rcv_scale is installed, and after the handshake completes
+ * tp->rcv_scale = tp->request_r_scale, so request_r_scale is the canonical
+ * source in both states.
+ */
+void
+tcp_eventlog_conn_params(struct tcpcb *tp)
+{
+	uint8_t flags = 0;
+	const char *cc_name = "";
+	const char *stack_name = "";
+
+	KASSERT(tp != NULL, ("tcp_eventlog_conn_params: tp == NULL"));
+
+	if (!TCP_EVENTLOG_CONN_PARAMS_V2_ENABLED(tp->t_eventlog_session))
+		return;
+
+	if (tp->t_flags & TF_SACK_PERMIT)
+		flags |= TCP_EVENTLOG_FLAG_CP_SACK_PERMIT;
+	if (tp->t_flags & TF_RCVD_TSTMP)
+		flags |= TCP_EVENTLOG_FLAG_CP_TIMESTAMPS;
+	if (tp->t_flags2 & TF2_ECN_PERMIT)
+		flags |= TCP_EVENTLOG_FLAG_CP_ECN;
+	if (tp->t_flags2 & TF2_ACE_PERMIT)
+		flags |= TCP_EVENTLOG_FLAG_CP_ACE;
+	if (tp->t_flags & TF_FASTOPEN)
+		flags |= TCP_EVENTLOG_FLAG_CP_FASTOPEN;
+	if (tp->t_flags & TF_SIGNATURE)
+		flags |= TCP_EVENTLOG_FLAG_CP_SIGNATURE;
+	/*
+	 * Window scaling is "negotiated" only when both sides exchanged the
+	 * option in the SYN/SYN-ACK; without this flag, snd_wscale=rcv_wscale=0
+	 * is ambiguous between "shift 0 negotiated" and "wscale absent".
+	 */
+	if ((tp->t_flags & (TF_REQ_SCALE | TF_RCVD_SCALE)) ==
+	    (TF_REQ_SCALE | TF_RCVD_SCALE))
+		flags |= TCP_EVENTLOG_FLAG_CP_WINDOW_SCALE;
+
+	if (CC_ALGO(tp) != NULL)
+		cc_name = CC_ALGO(tp)->name;
+	if (tp->t_fb != NULL)
+		stack_name = tp->t_fb->tfb_tcp_block_name;
+
+	TCP_EVENTLOG_CONN_PARAMS_V2_LOG_ALWAYS(tp->t_eventlog_session,
+	    tp->iss, tp->irs, tp->t_maxseg, tp->snd_scale, tp->request_r_scale,
+	    flags, cc_name, stack_name);
+}
+
+/*
+ * Emit eventlog events for a TCP connection's current state (SESSION_CREATE,
+ * CONN_SET_IP, LOG_ID). Caller must hold the inp lock.
+ */
+static void
+tcp_eventlog_dump_session_state(struct tcpcb *tp, const char *log_id,
+    bool emit_session_create)
+{
+	struct inpcb *inp;
+
+	if (tp == NULL || tp->t_eventlog_session == NULL)
+		return;
+
+	inp = tptoinpcb(tp);
+
+	if (emit_session_create)
+		TCP_EVENTLOG_SESSION_CREATE_LOG(tp->t_eventlog_session, tp);
+
+	/*
+	 * Only emit the address once the local port is assigned; otherwise a
+	 * socket that enables logging before bind()/connect() would log an
+	 * all-zero 4-tuple, and a later connect() would log a second one.
+	 * A zero foreign port is fine: that is a listening socket.
+	 */
+#ifdef INET
+	if ((inp->inp_vflag & INP_IPV4) && inp->inp_lport != 0) {
+		TCP_EVENTLOG_CONN_SET_IP_V4_LOG(tp->t_eventlog_session,
+		    inp->inp_laddr, inp->inp_lport,
+		    inp->inp_faddr, inp->inp_fport);
+	}
+#endif
+#ifdef INET6
+	if ((inp->inp_vflag & INP_IPV6) && inp->inp_lport != 0) {
+		TCP_EVENTLOG_CONN_SET_IP_V6_LOG(tp->t_eventlog_session,
+		    inp->inp_inc.inc6_laddr, inp->inp_lport,
+		    inp->inp_inc.inc6_faddr, inp->inp_fport);
+	}
+#endif
+
+	if (log_id != NULL)
+		TCP_EVENTLOG_LOG_ID_LOG(tp->t_eventlog_session, log_id);
+
+	if (tp->iss != 0 || tp->irs != 0)
+		tcp_eventlog_conn_params(tp);
+
+	if (tp->t_owning_pid != 0)
+		TCP_EVENTLOG_CONN_OWNER_LOG(tp->t_eventlog_session,
+		    tp->t_owning_pid);
+}
+
+void
+tcp_eventlog_dump_session(struct tcpcb *tp, const char *log_id)
+{
+	tcp_eventlog_dump_session_state(tp, log_id, true);
+}
+
+/*
+ * Provider dump callback: emit current state for all TCP eventlog sessions.
+ * Invoked inline on the subscribing thread; uses normal event write macros
+ * which are automatically routed to the requesting subscriber.
+ */
+void
+tcp_eventlog_dump_state(struct eventlog_provider *provider __unused,
+    void *arg)
+{
+	struct tcp_function_block *tfb = arg;
+	VNET_ITERATOR_DECL(vnet_iter);
+	struct inpcb *inp;
+
+	/* Replay stack identity + sample period for late subscribers. */
+	TCP_EVENTLOG_TCP_STACK_INFO_LOG(
+	    tfb->tfb_eventlog_session_global,
+	    tfb->tfb_tcp_block_name,
+	    tcp_eventlog_sample_period_us);
+
+#ifdef TCP_REQUEST_TRK
+	/* Replay current RPS for late subscribers; sample ticks skip unchanged counts. */
+	TCP_EVENTLOG_TCP_RPS_SAMPLE_LOG(
+	    tfb->tfb_eventlog_session_global,
+	    atomic_load_64(&tfb->tfb_req_count));
+#endif
+
+	VNET_LIST_RLOCK();
+	VNET_FOREACH(vnet_iter) {
+		CURVNET_SET(vnet_iter);
+		struct inpcb_iterator inpi = INP_ALL_ITERATOR(&V_tcbinfo,
+		    INPLOOKUP_RLOCKPCB);
+
+		while ((inp = inp_next(&inpi)) != NULL) {
+			struct tcpcb *tp = intotcpcb(inp);
+			if (tp->t_eventlog_session == NULL)
+				continue;
+			tcp_eventlog_dump_session(tp, tcp_log_id_str(tp));
+		}
+		CURVNET_RESTORE();
+	}
+	VNET_LIST_RUNLOCK();
+}
+
+void
+tcp_eventlog_on_log_id_set(struct tcpcb *tp, const char *log_id)
+{
+	if (eventlog_provider_get_default(tp->t_fb->tfb_eventlog_provider) == 0) {
+		bool can_enable = true;
+		if (tcp_eventlog_log_id_limit >= 0) {
+			int old;
+			do {
+				old = atomic_load_acq_int(
+				    &tcp_eventlog_log_id_limit);
+				if (old <= 0) {
+					can_enable = false;
+					break;
+				}
+			} while (!atomic_cmpset_int(
+			    &tcp_eventlog_log_id_limit,
+			    old, old - 1));
+		}
+		if (can_enable) {
+			tp->t_flags2 |= TF2_EVENTLOG_ENABLED;
+			eventlog_session_set_enabled(
+			    tp->t_eventlog_session, 1);
+			tcp_eventlog_dump_session(tp, log_id);
+		}
+	} else {
+		tcp_eventlog_dump_session(tp, log_id);
+	}
+}
+
+void
+tcp_eventlog_sendfile(struct socket *so, off_t offset, size_t nbytes,
+    int flags)
+{
+	struct inpcb *inp = sotoinpcb(so);
+	struct tcpcb *tp = intotcpcb(inp);
+
+	INP_WLOCK(inp);
+	TCP_EVENTLOG_SENDFILE_LOG(tp->t_eventlog_session,
+	    offset, nbytes, flags);
+	INP_WUNLOCK(inp);
+}
+
 void
 tcp_switch_back_to_default(struct tcpcb *tp)
 {
@@ -532,6 +1011,7 @@ tcp_switch_back_to_default(struct tcpcb *tp)
 			/* Now set in all the pointers */
 			tp->t_fb = tfb;
 			tp->t_fb_ptr = ptr;
+			tcp_ensure_eventlog_session_on_switch(tp, tfb);
 			return;
 		}
 		/*
@@ -566,6 +1046,7 @@ tcp_switch_back_to_default(struct tcpcb *tp)
 	/* And set in the pointers to the new */
 	tp->t_fb = tfb;
 	tp->t_fb_ptr = ptr;
+	tcp_ensure_eventlog_session_on_switch(tp, tfb);
 }
 
 static bool
@@ -1469,10 +1950,60 @@ tcp_vnet_init(void *arg __unused)
 VNET_SYSINIT(tcp_vnet_init, SI_SUB_PROTO_DOMAIN, SI_ORDER_FOURTH,
     tcp_vnet_init, NULL);
 
+/*
+ * Subsystem-wide aggregate session for machine-level TCP samples.  Lives under
+ * the base "tcp" provider but emits no TCP_STACK_INFO, so it is not tied to any
+ * stack.  Its session_id is a top-bit-flagged special id that cannot collide
+ * with the per-stack global or per-connection sessions (inp_gencnt, >= 1).
+ */
+struct eventlog_session *tcp_eventlog_session_aggregate;
+
+/*
+ * Each stack module owns a (provider, STACK_GLOBAL) pair under the shared
+ * "tcp" provider name.  The STACK_GLOBAL id has the reserved top bit set, so
+ * it can't collide with per-connection sessions (which use inp_gencnt, always
+ * >= 1 and far below the top bit).  The global session is force-enabled so
+ * stack-level aggregate events flow without flipping kern.eventlog.tcp.default.
+ * Both primitives are M_WAITOK and therefore cannot fail.
+ */
+void
+tcp_eventlog_provider_register(struct tcp_function_block *tfb,
+    const struct eventlog_provider_config *cfg)
+{
+	/* Pass tfb to the dump callback so it can emit TCP_STACK_INFO. */
+	struct eventlog_provider_config local_cfg = *cfg;
+
+	local_cfg.dump_callback_arg = tfb;
+	tfb->tfb_eventlog_provider = eventlog_provider_create("tcp", &local_cfg);
+	tfb->tfb_eventlog_session_global = eventlog_session_create(
+	    tfb->tfb_eventlog_provider, TCP_EVENTLOG_SESSION_ID_STACK_GLOBAL,
+	    true, NULL, 0);
+	eventlog_session_set_enabled(tfb->tfb_eventlog_session_global, 1);
+}
+
+void
+tcp_eventlog_provider_unregister(struct tcp_function_block *tfb)
+{
+	eventlog_session_destroy(tfb->tfb_eventlog_session_global);
+	tfb->tfb_eventlog_session_global = NULL;
+	eventlog_provider_destroy(tfb->tfb_eventlog_provider);
+	tfb->tfb_eventlog_provider = NULL;
+}
+
 static void
 tcp_init(void *arg __unused)
 {
 	int hashsize;
+	struct sysctl_oid *evl_node;
+	struct sysctl_ctx_list *evl_ctx;
+	struct eventlog_provider_config cfg = {
+		.dump_callback = tcp_eventlog_dump_state,
+		.default_changed = tcp_eventlog_default_changed,
+		.subscribers_changed = tcp_eventlog_subscribers_changed,
+		.decode_blob = tcp_eventlog_decode_blob,
+		.decode_blob_size = tcp_eventlog_decode_blob_size,
+		.flags = EVENTLOG_PROVIDER_AUTO_RATIO,
+	};
 
 	tcp_reass_global_init();
 
@@ -1493,6 +2024,28 @@ tcp_init(void *arg __unused)
 	/* Setup the tcp function block list */
 	TAILQ_INIT(&t_functions);
 	rw_init(&tcp_function_lock, "tcp_func_lock");
+	mtx_init(&tcp_eventlog_sample_mtx, "tcp_evl_sample", NULL, MTX_DEF);
+	callout_init_mtx(&tcp_eventlog_sample_callout,
+	    &tcp_eventlog_sample_mtx, 0);
+	/*
+	 * Base "tcp" provider + its global/aggregate sessions live for the
+	 * kernel's lifetime: the provider accumulates per-connection sessions,
+	 * so it is intentionally never destroyed (no safe teardown point).
+	 */
+	tcp_eventlog_provider_register(&tcp_def_funcblk, &cfg);
+	tcp_eventlog_session_aggregate = eventlog_session_create(
+	    tcp_def_funcblk.tfb_eventlog_provider,
+	    TCP_EVENTLOG_SESSION_ID_AGGREGATE, true, NULL, 0);
+	eventlog_session_set_enabled(tcp_eventlog_session_aggregate, 1);
+	evl_node = eventlog_provider_get_sysctl_node(
+	    tcp_def_funcblk.tfb_eventlog_provider);
+	evl_ctx = eventlog_provider_get_sysctl_ctx(
+	    tcp_def_funcblk.tfb_eventlog_provider);
+	SYSCTL_ADD_PROC(evl_ctx, SYSCTL_CHILDREN(evl_node),
+	    OID_AUTO, "sample_period_us",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE,
+	    NULL, 0, tcp_eventlog_sample_period_us_sysctl, "IU",
+	    "TCP SAMPLE emission period in us (1000-1800000000)");
 	register_tcp_functions(&tcp_def_funcblk, M_WAITOK);
 	sx_init(&tcpoudp_lock, "TCP over UDP configuration");
 #ifdef TCP_BLACKBOX
@@ -2081,6 +2634,21 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 	if (flags & TH_RST)
 		TCP_PROBE5(accept__refused, NULL, NULL, m, tp, nth);
 	lgb = NULL;
+	if (tp != NULL) {
+		TCP_EVENTLOG_OUT_LOG(tp->t_eventlog_session,
+		    ntohl(nth->th_seq),
+		    ntohl(nth->th_ack),
+		    tcp_get_flags(nth),
+		    ntohs(nth->th_win),
+		    (uint32_t)ntohs(nth->th_win) << tp->rcv_scale,
+		    0,
+		    tp->snd_cwnd,
+		    tp->t_state,
+		    nth->th_off,
+		    ntohs(nth->th_urp),
+		    (uint8_t)((nth->th_off << 2) - sizeof(struct tcphdr)),
+		    (const uint8_t *)(nth + 1));
+	}
 	if ((tp != NULL) && tcp_bblogging_on(tp)) {
 		if (INP_WLOCKED(inp)) {
 			union tcp_log_stackspecific log;
@@ -2245,6 +2813,12 @@ tcp_newtcpcb(struct inpcb *inp, struct tcpcb *listening_tcb)
 			return (NULL);
 		}
 		tp->t_fb = listening_tcb->t_fb;
+		/*
+		 * Inherit owning PID from the listening socket so that
+		 * passively-accepted connections are attributed to the
+		 * process that created the listener.
+		 */
+		tp->t_owning_pid = listening_tcb->t_owning_pid;
 	} else {
 		tp->t_fb = V_tcp_func_set_ptr;
 	}
@@ -2349,9 +2923,24 @@ tcp_newtcpcb(struct inpcb *inp, struct tcpcb *listening_tcb)
 	/* Initialize the per-TCPCB log data. */
 	tcp_log_tcpcbinit(tp);
 #endif
+
+	/* Create per-connection eventlog session. Session ID is inp_gencnt. */
+	{
+		struct tcp_eventlog_session_create create_payload;
+
+		create_payload.tp = tp;
+		tp->t_eventlog_session = eventlog_session_create(
+		    tp->t_fb->tfb_eventlog_provider,
+		    inp->inp_gencnt,
+		    false,
+		    &create_payload,
+		    sizeof(create_payload));
+	}
+
 	tp->t_pacing_rate = -1;
 	if (tp->t_fb->tfb_tcp_fb_init) {
 		if ((*tp->t_fb->tfb_tcp_fb_init)(tp, &tp->t_fb_ptr)) {
+			eventlog_session_destroy(tp->t_eventlog_session);
 			if (CC_ALGO(tp)->cb_destroy != NULL)
 				CC_ALGO(tp)->cb_destroy(&tp->t_ccv);
 			CC_DATA(tp) = NULL;
@@ -2437,6 +3026,23 @@ tcp_discardcb(struct tcpcb *tp)
 #endif
 #ifdef TCP_REQUEST_TRK
 	if (tp->t_tcpreq_info != NULL) {
+		/*
+		 * Requests still tracked at teardown never completed; emit a
+		 * terminal FORCEFREE for each so every HTTP_REQ_NEW is closed
+		 * out in the log.
+		 */
+		if (tp->t_tcpreq_req > 0) {
+			struct tcp_sendfile_track *ent;
+			int i;
+
+			for (i = 0; i < MAX_TCP_TRK_REQ; i++) {
+				ent = &tp->t_tcpreq_info[i];
+				if (ent->flags == TCP_TRK_TRACK_FLG_EMPTY)
+					continue;
+				tcp_req_log_req_info(tp, ent, i,
+				    TCP_TRK_REQ_LOG_FORCEFREE, 0, 0);
+			}
+		}
 		free(tp->t_tcpreq_info, M_TCPREQTRK);
 		tp->t_tcpreq_info = NULL;
 	}
@@ -2457,6 +3063,12 @@ tcp_discardcb(struct tcpcb *tp)
 #ifdef TCP_BLACKBOX
 	tcp_log_tcpcbfini(tp);
 #endif
+
+	/*
+	 * Destroy per-connection eventlog session (emits SESSION_END).
+	 */
+	eventlog_session_destroy(tp->t_eventlog_session);
+	tp->t_eventlog_session = NULL;
 
 	/*
 	 * If we got enough samples through the srtt filter,
@@ -4692,6 +5304,55 @@ tcp_req_log_req_info(struct tcpcb *tp, struct tcp_sendfile_track *req,
 		    TCP_LOG_REQ_T, 0,
 		    0, &log, false, &tv);
 	}
+
+	/*
+	 * Mirror into EventLog. For LOG_FREED, offset carries last_ack_us;
+	 * for LOG_STALE, offset is time_delta and nbytes is is_oldest;
+	 * LOG_FORCEFREE (connection teardown with the request still live)
+	 * ignores offset and nbytes.
+	 */
+	switch (val) {
+	case TCP_TRK_REQ_LOG_NEW:
+		TCP_EVENTLOG_HTTP_REQ_NEW_LOG(tp->t_eventlog_session,
+		    (uint8_t)slot, req->flags,
+		    req->start, req->end,
+		    req->start_seq, req->end_seq,
+		    req->timestamp, req->localtime, req->first_rcv_us,
+		    req->playout_ms);
+		break;
+	case TCP_TRK_REQ_LOG_FREED:
+		TCP_EVENTLOG_HTTP_REQ_FREED_LOG(tp->t_eventlog_session,
+		    (uint8_t)slot, req->flags,
+		    req->start_seq, req->end_seq,
+		    req->start, req->end,
+		    req->timestamp, req->localtime, req->first_rcv_us,
+		    req->first_send, offset,
+		    req->sent_at_fs, req->sent_at_ls);
+		break;
+	case TCP_TRK_REQ_LOG_STALE:
+		TCP_EVENTLOG_HTTP_REQ_STALE_LOG(tp->t_eventlog_session,
+		    (uint8_t)slot, req->flags, (uint8_t)nbytes,
+		    req->start_seq, req->end_seq,
+		    req->start, req->end,
+		    req->localtime, offset);
+		break;
+	case TCP_TRK_REQ_LOG_ALLOCFAIL:
+		TCP_EVENTLOG_HTTP_REQ_ALLOCFAIL_LOG(tp->t_eventlog_session,
+		    (uint8_t)slot, req->flags,
+		    req->start_seq, req->end_seq,
+		    req->start, req->end);
+		break;
+	case TCP_TRK_REQ_LOG_FORCEFREE:
+		TCP_EVENTLOG_HTTP_REQ_FORCEFREE_LOG(tp->t_eventlog_session,
+		    (uint8_t)slot, req->flags,
+		    req->start_seq, req->end_seq,
+		    req->start, req->end,
+		    req->timestamp, req->localtime, req->first_rcv_us,
+		    req->first_send, req->sent_at_fs, req->sent_at_ls);
+		break;
+	default:
+		break;
+	}
 }
 
 void
@@ -4706,6 +5367,7 @@ tcp_req_free_a_slot(struct tcpcb *tp, struct tcp_sendfile_track *ent)
 		if (tp->t_tcpreq_closed > 0)
 			tp->t_tcpreq_closed--;
 	}
+	memset(ent, 0, sizeof(*ent));
 	ent->flags = TCP_TRK_TRACK_FLG_EMPTY;
 }
 
@@ -4750,7 +5412,7 @@ tcp_req_check_for_stale_entries(struct tcpcb *tp, uint64_t ts, int rm_oldest)
 	}
 	if ((cnt_rm == 0) && rm_oldest && oldest_set) {
 		ent = &tp->t_tcpreq_info[oldest];
-		tcp_req_log_req_info(tp, &tp->t_tcpreq_info[i], i, TCP_TRK_REQ_LOG_STALE,
+		tcp_req_log_req_info(tp, ent, oldest, TCP_TRK_REQ_LOG_STALE,
 				      oldest_delta, 1);
 		tcp_req_free_a_slot(tp, ent);
 	}
@@ -4760,6 +5422,7 @@ int
 tcp_req_check_for_comp(struct tcpcb *tp, tcp_seq ack_point)
 {
 	int i, ret = 0;
+	uint64_t last_ack_us = 0;
 	struct tcp_sendfile_track *ent;
 
 	/* Clean up any old closed end requests that are now completed */
@@ -4776,9 +5439,12 @@ tcp_req_check_for_comp(struct tcpcb *tp, tcp_seq ack_point)
 		if (ent->flags & TCP_TRK_TRACK_FLG_OPEN)
 			continue;
 		if (SEQ_GEQ(ack_point, ent->end_seq)) {
+			if (last_ack_us == 0)
+				last_ack_us = tcp_get_u64_usecs(NULL);
 			/* We are past it -- free it */
 			tcp_req_log_req_info(tp, ent,
-					      i, TCP_TRK_REQ_LOG_FREED, 0, 0);
+					      i, TCP_TRK_REQ_LOG_FREED,
+					      last_ack_us, 0);
 			tcp_req_free_a_slot(tp, ent);
 			ret++;
 		}
@@ -4976,6 +5642,7 @@ tcp_req_alloc_req_full(struct tcpcb *tp, struct tcp_snd_req *req, uint64_t ts, i
 				tp->t_tcpreq_closed++;
 			tcp_req_log_req_info(tp, fil, i,
 			    TCP_TRK_REQ_LOG_NEW, 0, 0);
+			atomic_add_64(&tp->t_fb->tfb_req_count, 1);
 			break;
 		} else
 			fil = NULL;
@@ -5007,10 +5674,17 @@ tcp_log_socket_option(struct tcpcb *tp, uint32_t option_num, uint32_t option_val
 			l->tlb_flex2 = option_val;
 		}
 	}
+	if (err != 0) {
+		TCP_EVENTLOG_SOCKET_OPT_ERR_LOG(tp->t_eventlog_session,
+		    option_num, err);
+	} else {
+		TCP_EVENTLOG_SOCKET_OPT_UINT32_LOG(tp->t_eventlog_session,
+		    option_num, option_val);
+	}
 }
 
 uint32_t
-tcp_get_srtt(struct tcpcb *tp, int granularity)
+tcp_get_srtt(const struct tcpcb *tp, int granularity)
 {
 	uint32_t srtt;
 

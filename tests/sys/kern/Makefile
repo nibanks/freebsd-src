@@ -169,6 +169,7 @@ CFLAGS.procdesc+=	-I${SRCTOP}/tests
 CFLAGS.ptrace_test+=	-I${SRCTOP}/tests
 
 ATF_TESTS_PYTEST+=	kern_eventlog_test.py
+ATF_TESTS_PYTEST+=	elog_test.py
 
 # Unit test for the elog decode-blob interpreter.  It links the interpreter
 # (usr.bin/elog/decode.c) directly and drives it with hand-built blobs, so it

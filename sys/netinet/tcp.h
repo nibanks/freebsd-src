@@ -219,6 +219,8 @@ __tcp_set_flags(struct tcphdr *th, uint16_t flags)
 #define	TCP_PROC_ACCOUNTING	76	/* int; Do accounting on tcp cpu usage and counts */
 #define	TCP_USE_CMP_ACKS	77	/* int; The transport can handle the Compressed mbuf acks */
 #define	TCP_PERF_INFO		78	/* struct tcp_perf_info; retrieve accounting counters */
+#define	TCP_EVENTLOG		81	/* enable/disable eventlog for connection */
+#define	TCP_EVENTLOG_INFO	82	/* struct tcp_eventlog_info; session id + enablement */
 #define	TCP_KEEPINIT		128	/* u_int; N, time to establish connection */
 #define	TCP_KEEPIDLE		256	/* u_int; L,N,X start keeplives after this period */
 #define	TCP_KEEPINTVL		512	/* u_int; L,N interval between keepalives */
@@ -343,6 +345,7 @@ __tcp_set_flags(struct tcphdr *th, uint16_t flags)
 #define	TCP_STACK_SPEC_INFO	1160	/* Get stack specific information (if present) */
 #define	RACK_CSPR_IS_FCC	1161
 #define	TCP_GP_USE_LTBW		1162	/* int; how we use lt_bw 0=not, 1=min, 2=max */
+#define	TCP_EVENTLOG_RATIO	1164	/* int; enable eventlog for 1-in-N log-ID sessions */
 
 
 /* Start of reserved space for third-party user-settable options. */
@@ -371,6 +374,11 @@ struct tcp_perf_info {
 	uint64_t	tcp_proc_time[TCP_NUM_CNT_COUNTERS];
 	uint64_t	timebase;	/* timebase for tcp_proc_time */
 	uint8_t		tb_is_stable;	/* timebase is stable/invariant */
+};
+
+struct tcp_eventlog_info {
+	uint64_t	session_id;
+	int		enabled;
 };
 
 /*

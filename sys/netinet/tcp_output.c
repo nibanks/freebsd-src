@@ -79,6 +79,7 @@
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/tcp_syncache.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcpip.h>
@@ -1426,6 +1427,32 @@ send:
 		    NULL);
 	else
 		lgb = NULL;
+
+	/*
+	 * A send is a retransmit when it comes from the SACK scoreboard,
+	 * or when it carries data/SYN/FIN below snd_max (snd_nxt was
+	 * rewound by an RTO or fast retransmit).  Persist probes are
+	 * excluded: they use snd_nxt while snd_max may sit one byte
+	 * beyond the window (see the th_seq setup above), and "retransmit
+	 * and persist are mutually exclusive".
+	 */
+	TCP_EVENTLOG_OUT_LOG(tp->t_eventlog_session,
+	    ntohl(th->th_seq),
+	    ntohl(th->th_ack),
+	    tcp_get_flags(th) |
+	    ((sack_rxmit || (!tcp_timer_active(tp, TT_PERSIST) &&
+	    (len > 0 || (flags & (TH_SYN | TH_FIN))) &&
+	    SEQ_LT(ntohl(th->th_seq), tp->snd_max))) ?
+	    TCP_EVENTLOG_FLAG_RETRANSMIT : 0),
+	    ntohs(th->th_win),
+	    (uint32_t)ntohs(th->th_win) << tp->rcv_scale,
+	    len,
+	    tp->snd_cwnd,
+	    tp->t_state,
+	    th->th_off,
+	    ntohs(th->th_urp),
+	    (uint8_t)((th->th_off << 2) - sizeof(struct tcphdr)),
+	    (const uint8_t *)(th + 1));
 
 	/*
 	 * Fill in IP length and desired time to live and

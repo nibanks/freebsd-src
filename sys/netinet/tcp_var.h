@@ -445,6 +445,8 @@ struct tcpcb {
 	struct tcp_log_stailq t_logs;	/* Log buffer */
 	struct tcp_log_id_node *t_lin;
 	struct tcp_log_id_bucket *t_lib;
+	struct eventlog_session *t_eventlog_session; /* Per-connection eventlog session */
+	pid_t	t_owning_pid;		/* PID of process that opened this connection */
 	const char *t_output_caller;	/* Function that called tcp_output */
 	struct statsblob *t_stats;	/* Per-connection stats */
 	/* Should these be a pointer to the arrays or an array? */
@@ -627,6 +629,13 @@ struct tcp_function_block {
 	volatile uint32_t tfb_refcnt;
 	uint32_t  tfb_flags;
 	uint8_t	tfb_id;
+	struct eventlog_provider *tfb_eventlog_provider;
+	/* STACK_GLOBAL session id; force-enabled for stack-level aggregate events. */
+	struct eventlog_session *tfb_eventlog_session_global;
+	/* Cumulative HTTP request count, sampled as TCP_RPS_SAMPLE. */
+	volatile uint64_t tfb_req_count;
+	/* Last req_count published as TCP_RPS_SAMPLE. */
+	uint64_t tfb_req_count_last;
 };
 
 /* Maximum number of names each TCP function block can be registered with. */
@@ -858,6 +867,7 @@ tcp_packets_this_ack(struct tcpcb *tp, tcp_seq ack)
 #define	TF2_PROC_SACK_PROHIBIT	0x00100000 /* Due to small MSS size do not process sack's */
 #define	TF2_IPSEC_TSO		0x00200000 /* IPSEC + TSO supported */
 #define	TF2_NO_ISS_CHECK	0x00400000 /* Don't check SEG.ACK against ISS */
+#define	TF2_EVENTLOG_ENABLED	0x02000000 /* User requested eventlog enabled */
 
 /* t_flags2 description for use with printf(9) %b identifier. */
 #define	TF2_BITS	"\20" \
@@ -872,7 +882,7 @@ tcp_packets_this_ack(struct tcpcb *tp, tcp_seq ack)
     "\21TF2_SUPPORTS_MBUFQ\22TF2_MBUF_QUEUE_READY" \
     "\23TF2_DONT_SACK_QUEUE\24TF2_CANNOT_DO_ECN" \
     "\25TF2_PROC_SACK_PROHIBIT\26TF2_IPSEC_TSO" \
-    "\27TF2_NO_ISS_CHECK"
+    "\27TF2_NO_ISS_CHECK\32TF2_EVENTLOG_ENABLED"
 
 /*
  * Structure to hold TCP options that are only used during segment
@@ -1291,6 +1301,7 @@ struct tcp_function_info {
 #ifdef SYSCTL_DECL
 SYSCTL_DECL(_net_inet_tcp);
 SYSCTL_DECL(_net_inet_tcp_sack);
+SYSCTL_DECL(_net_inet_tcp_eventlog);
 MALLOC_DECLARE(M_TCPLOG);
 #endif
 
@@ -1455,8 +1466,38 @@ int deregister_tcp_functions(struct tcp_function_block *blk, bool quiesce,
     bool force);
 struct tcp_function_block *find_and_ref_tcp_functions(struct tcp_function_set *fs);
 int find_tcp_function_alias(struct tcp_function_block *blk, struct tcp_function_set *fs);
-uint32_t tcp_get_srtt(struct tcpcb *tp, int granularity);
+uint32_t tcp_get_srtt(const struct tcpcb *tp, int granularity);
 void tcp_switch_back_to_default(struct tcpcb *tp);
+void tcp_ensure_eventlog_session_on_switch(struct tcpcb *tp,
+    struct tcp_function_block *tfb);
+void tcp_eventlog_dump_state(struct eventlog_provider *provider, void *arg);
+void tcp_eventlog_default_changed(struct eventlog_provider *provider,
+    int value, void *arg);
+struct eventlog_provider_config;
+void tcp_eventlog_provider_register(struct tcp_function_block *tfb,
+    const struct eventlog_provider_config *cfg);
+void tcp_eventlog_provider_unregister(struct tcp_function_block *tfb);
+/*
+ * TCP EventLog session-id space.  The top bit flags a "special"
+ * (non-per-connection) session; the low bits enumerate them, widest scope
+ * first.  Per-connection sessions use inp_gencnt (always >= 1 and nowhere near
+ * the top bit), so they can never collide with a reserved id.
+ */
+#define	TCP_EVENTLOG_SESSION_ID_SPECIAL		((uint64_t)1 << 63)
+/* Subsystem-wide aggregate session (machine-level TCP samples). */
+#define	TCP_EVENTLOG_SESSION_ID_AGGREGATE	(TCP_EVENTLOG_SESSION_ID_SPECIAL | 0)
+/* Per-stack global session (stack-level aggregate events). */
+#define	TCP_EVENTLOG_SESSION_ID_STACK_GLOBAL	(TCP_EVENTLOG_SESSION_ID_SPECIAL | 1)
+extern struct eventlog_session *tcp_eventlog_session_aggregate;
+void tcp_eventlog_dump_session(struct tcpcb *tp, const char *log_id);
+void tcp_eventlog_on_log_id_set(struct tcpcb *tp, const char *log_id);
+void tcp_eventlog_sendfile(struct socket *so, off_t offset, size_t nbytes,
+    int flags);
+void tcp_eventlog_conn_params(struct tcpcb *tp);
+
+/* Shared SAMPLE period (us); knob: kern.eventlog.tcp.sample_period_us. */
+extern uint32_t tcp_eventlog_sample_period_us;
+
 struct tcp_function_block *
 find_and_ref_tcp_fb(struct tcp_function_block *fs);
 int tcp_default_ctloutput(struct tcpcb *tp, struct sockopt *sopt);
