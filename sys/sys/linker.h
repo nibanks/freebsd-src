@@ -132,6 +132,10 @@ typedef int linker_predicate_t(linker_file_t, void *);
  */
 extern linker_file_t	linker_kernel_file;
 
+/* Linker-script symbols bounding the kernel build-id note. */
+extern char		__build_id_start[];
+extern char		__build_id_end[];
+
 /*
  * Special symbol which will be replaced by a reference to the linker_file_t
  * of the module it is used in.

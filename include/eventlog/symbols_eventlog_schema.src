@@ -1,0 +1,113 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 Netflix, Inc.
+ *
+ * Schema for the "symbols" eventlog provider.
+ *
+ * Carries the metadata any consumer needs to translate raw kernel and
+ * user-mode instruction pointers (CPU samples, allocation stacks, ...)
+ * into "filename + symbol + offset" without access to the original
+ * /boot/kernel or the running process's executable mappings.
+ *
+ * The provider exposes one global session. The kernel half of the
+ * provider emits KERNEL_INFO at session create, walks the linker file
+ * list under dump_state to emit LINKER_FILE / SYMBOL_RANGE for the
+ * running kernel and every loaded module, and interns user-mode
+ * binaries on demand via eventlog_symbols_intern_user_file() (called
+ * by the process provider's PROC_EXEC / PROC_MMAP hooks). The
+ * user-mode half (libelog_user_symbols + elog -U) writes
+ * USER_SYMBOL_RANGE events back into the .elog stream after the fact
+ * to cover stripped binaries via DWARF. elog -L /
+ * libelog_source_lines additionally walks DWARF .debug_line for each
+ * sampled PC and emits SOURCE_FILE / SOURCE_LINE so offline
+ * consumers can annotate source without a matching local ELF.
+ *
+ * Cross-provider contract: USER_FILE.user_file_id is allocated by
+ * eventlog_symbols_intern_user_file() and is the same value referenced
+ * by PROC_MAP.user_file_id in the process provider. user_file_id zero
+ * is reserved for "no file backing" and never appears here.
+ */
+
+PROVIDER symbols
+
+KEYWORD KERNEL_META  1
+KEYWORD SYMBOL_META  2
+KEYWORD USER_META    4
+KEYWORD REFS         8
+KEYWORD SOURCE_META  16
+
+FLAG linker_flags
+    0x01:LINKED
+    0x02:KERNEL
+    0x04:NAME_TRUNCATED
+
+STRUCT KERNEL_INFO
+    text_base:uint64_t:hex
+    text_size:uint64_t:hex
+    build_id:char[41]
+    ident:char[64]
+STRUCT LINKER_FILE
+    file_id:uint32_t
+    base:uint64_t:hex
+    size:uint64_t:hex
+    flags:uint32_t:hex
+    build_id:char[41]
+    filename:char[64]
+    pathname:char[128]
+STRUCT SYMBOL_RANGE
+    file_id:uint32_t
+    offset:uint64_t:hex
+    size:uint32_t
+    name:char[96]
+STRUCT USER_FILE
+    user_file_id:uint32_t
+    build_id:char[41]
+    pathname:char[128]
+STRUCT USER_SYMBOL_RANGE
+    user_file_id:uint32_t
+    offset:uint64_t:hex
+    size:uint32_t
+    name:char[96]
+/*
+ * DWARF line mappings synthesised by elog -L. SOURCE_FILE is one row
+ * per distinct source path; SOURCE_LINE maps one sampled instruction
+ * (same file-offset space as SYMBOL_RANGE / USER_SYMBOL_RANGE) to a
+ * 1-based line. binary_kind: 0 = LINKER_FILE.file_id, 1 =
+ * USER_FILE.user_file_id. commit_id is the firmware git commit on
+ * kernel rows, empty when unknown.
+ */
+STRUCT SOURCE_FILE
+    source_file_id:uint32_t
+    binary_kind:uint8_t
+    binary_id:uint32_t
+    commit_id:char[41]
+    pathname:char[256]
+STRUCT SOURCE_LINE
+    source_file_id:uint32_t
+    binary_kind:uint8_t
+    binary_id:uint32_t
+    file_offset:uint64_t:hex
+    line:uint32_t
+STRUCT SYMBOL_PACK_REF
+    kind:uint8_t
+    id_kind:uint8_t
+    file_id:uint32_t
+    pack_id:char[65]
+
+EVENT KERNEL_INFO        0  INFO     KERNEL_META  KERNEL_INFO
+    "kernel text=%1..%2 build_id=%3 ident=%4"
+EVENT LINKER_FILE        1  INFO     KERNEL_META  LINKER_FILE
+    "linker_file id=%1 base=%2 size=%3 flags=%4 build_id=%5 filename=%6 pathname=%7"
+EVENT SYMBOL_RANGE       2  INFO     SYMBOL_META  SYMBOL_RANGE
+    "symbol file=%1 offset=%2 size=%3 name=%4"
+EVENT USER_FILE          3  INFO     USER_META    USER_FILE
+    "user_file id=%1 build_id=%2 pathname=%3"
+EVENT USER_SYMBOL_RANGE  4  INFO     SYMBOL_META  USER_SYMBOL_RANGE
+    "user_symbol file=%1 offset=%2 size=%3 name=%4"
+EVENT SOURCE_FILE        5  INFO     SOURCE_META  SOURCE_FILE
+    "source_file id=%1 kind=%2 binary=%3 commit=%4 path=%5"
+EVENT SOURCE_LINE        6  INFO     SOURCE_META  SOURCE_LINE
+    "source_line file=%1 kind=%2 binary=%3 offset=%4 line=%5"
+EVENT SYMBOL_PACK_REF    7  INFO     REFS         SYMBOL_PACK_REF
+    "symbol_pack_ref kind=%1 id_kind=%2 file=%3 pack_id=%4"
