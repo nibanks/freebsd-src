@@ -1,0 +1,54 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 Netflix, Inc.
+ *
+ * Schema for the "cpu" eventlog provider.
+ *
+ * Per-CPU eventlog_session emitting CPU_SAMPLE callchains from hwpmc
+ * CPU_CYCLES overflows, plus CPU_INFO (ncpus / hz / pmchz /
+ * freq_max_mhz) and ARM_FAILED if the sampler cannot start.
+ */
+
+PROVIDER cpu
+
+KEYWORD KSTACK    1
+KEYWORD CPU_META  2
+
+ENUM sample_type
+    1:HWPMC
+
+FLAG sample_flags
+    0x01:USER_MODE
+    0x02:IDLE
+    0x04:INTR
+    0x08:TRUNC
+    0x10:FREQ_VALID
+
+STRUCT CPU_INFO
+    ncpus:uint32_t
+    hz:uint32_t
+    pmchz:uint32_t
+    freq_max_mhz:uint16_t
+STRUCT CPU_SAMPLE
+    tid:uint32_t
+    pid:uint32_t
+    type:uint8_t:enum_sample_type
+    flags:uint8_t:flag_sample_flags
+    depth:uint8_t
+    freq_mhz:uint16_t
+    frames:uint64_t[depth:64]
+STRUCT OVERFLOW
+    dropped:uint32_t
+STRUCT ARM_FAILED
+    error:int32_t
+    pmchz:uint32_t
+
+EVENT CPU_INFO     0  INFO     CPU_META  CPU_INFO
+    "cpu ncpus=%1 hz=%2 pmchz=%3 freq_max_mhz=%4"
+EVENT CPU_SAMPLE   1  VERBOSE  KSTACK    CPU_SAMPLE
+    "sample tid=%1 pid=%2 type=%3 flags=%4 depth=%5"
+EVENT OVERFLOW     2  WARN     KSTACK    OVERFLOW
+    "sample overflow: dropped=%1"
+EVENT ARM_FAILED   3  ERROR    CPU_META,KSTACK  ARM_FAILED
+    "hwpmc arm failed: error=%1 pmchz=%2"
