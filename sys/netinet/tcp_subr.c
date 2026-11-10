@@ -4932,6 +4932,16 @@ tcp_req_alloc_req_full(struct tcpcb *tp, struct tcp_snd_req *req, uint64_t ts, i
 			fil->timestamp = req->timestamp;
 			fil->playout_ms = req->playout_ms;
 			fil->localtime = ts;
+			fil->first_rcv_us = tp->t_req_first_rcv_us;
+			/*
+			 * Clear both the lock flag and the value: the next
+			 * request shouldn't inherit this one's first-byte
+			 * timestamp if no new inbound segment arrives before
+			 * it's allocated.  Consumers treat first_rcv_us==0
+			 * as "no inbound byte recorded for this request".
+			 */
+			tp->t_req_first_rcv_locked = 0;
+			tp->t_req_first_rcv_us = 0;
 			fil->start = req->start;
 			if (req->flags & TCP_LOG_HTTPD_RANGE_END) {
 				fil->end = req->end;

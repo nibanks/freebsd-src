@@ -152,6 +152,7 @@ struct tcp_sendfile_track {
 	uint64_t localtime;	/* Time we actually got the req */
 	uint64_t deadline;	/* If in CU mode, deadline to delivery */
 	uint64_t first_send;	/* Time of first send in the range */
+	uint64_t first_rcv_us;	/* usec time first byte of req arrived from wire */
 	uint64_t cspr;		/* Client suggested pace rate */
 	uint64_t sent_at_fs;	/* What was t_sndbytes as we begun sending */
 	uint64_t rxt_at_fs;	/* What was t_snd_rxt_bytes as we begun sending */
@@ -490,9 +491,11 @@ struct tcpcb {
 	uint8_t t_tcpreq_req;	/* Request count */
 	uint8_t t_tcpreq_open;	/* Number of open range requests */
 	uint8_t t_tcpreq_closed;	/* Number of closed range requests */
+	uint8_t t_req_first_rcv_locked; /* t_req_first_rcv_us has been stamped */
 	uint32_t tcp_hybrid_start;	/* Num of times we started hybrid pacing */
 	uint32_t tcp_hybrid_stop;	/* Num of times we stopped hybrid pacing */
 	uint32_t tcp_hybrid_error;	/* Num of times we failed to start hybrid pacing */
+	uint64_t t_req_first_rcv_us;	/* usec time of first inbound byte for next request */
 	struct tcp_sendfile_track *t_tcpreq_info;
 #endif
 #ifdef TCP_ACCOUNTING
@@ -1589,10 +1592,28 @@ void
 tcp_req_alloc_req(struct tcpcb *tp, union tcp_log_userdata *user,
     uint64_t ts);
 
+static inline void
+tcp_request_stamp_first_rcv(struct tcpcb *tp)
+{
+	struct timeval tv;
+
+	if (tp->t_req_first_rcv_locked == 0) {
+		microuptime(&tv);
+		tp->t_req_first_rcv_us = (uint64_t)tv.tv_sec * 1000000 +
+		    tv.tv_usec;
+		tp->t_req_first_rcv_locked = 1;
+	}
+}
+
 struct tcp_sendfile_track *
 tcp_req_alloc_req_full(struct tcpcb *tp, struct tcp_snd_req *req, uint64_t ts, int rec_dups);
 
 
+#else
+static inline void
+tcp_request_stamp_first_rcv(struct tcpcb *tp __unused)
+{
+}
 #endif
 #ifdef TCP_ACCOUNTING
 int tcp_do_ack_accounting(struct tcpcb *tp, struct tcphdr *th, struct tcpopt *to, uint32_t tiwin, int mss);

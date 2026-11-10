@@ -1855,14 +1855,16 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 				tcp_clean_sackreport(tp);
 			TCPSTAT_INC(tcps_preddat);
 			tp->rcv_nxt += tlen;
-			if (tlen &&
-			    ((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
-			    (tp->t_fbyte_in == 0)) {
-				tp->t_fbyte_in = ticks;
-				if (tp->t_fbyte_in == 0)
-					tp->t_fbyte_in = 1;
-				if (tp->t_fbyte_out && tp->t_fbyte_in)
-					tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+			if (tlen) {
+				if (((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
+				    (tp->t_fbyte_in == 0)) {
+					tp->t_fbyte_in = ticks;
+					if (tp->t_fbyte_in == 0)
+						tp->t_fbyte_in = 1;
+					if (tp->t_fbyte_out && tp->t_fbyte_in)
+						tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+				}
+				tcp_request_stamp_first_rcv(tp);
 			}
 			/*
 			 * Pull snd_wl1 up to prevent seq wrap relative to
@@ -3158,14 +3160,16 @@ dodata:							/* XXX */
 			else
 				tp->t_flags |= TF_ACKNOW;
 			tp->rcv_nxt += tlen;
-			if (tlen &&
-			    ((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
-			    (tp->t_fbyte_in == 0)) {
-				tp->t_fbyte_in = ticks;
-				if (tp->t_fbyte_in == 0)
-					tp->t_fbyte_in = 1;
-				if (tp->t_fbyte_out && tp->t_fbyte_in)
-					tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+			if (tlen) {
+				if (((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
+				    (tp->t_fbyte_in == 0)) {
+					tp->t_fbyte_in = ticks;
+					if (tp->t_fbyte_in == 0)
+						tp->t_fbyte_in = 1;
+					if (tp->t_fbyte_out && tp->t_fbyte_in)
+						tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+				}
+				tcp_request_stamp_first_rcv(tp);
 			}
 			thflags = tcp_get_flags(th) & TH_FIN;
 			TCPSTAT_INC(tcps_rcvpack);
