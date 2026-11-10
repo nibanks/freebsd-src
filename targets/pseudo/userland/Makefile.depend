@@ -187,6 +187,7 @@ DIRDEPS+= \
 	usr.bin/ee \
 	usr.bin/elf2aout \
 	usr.bin/elfdump \
+	usr.bin/elog \
 	usr.bin/enigma \
 	usr.bin/env \
 	usr.bin/expand \

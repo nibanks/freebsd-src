@@ -19,6 +19,9 @@ ATF_TESTS_C+=	kern_descrip_test
 # One test modifies the maxfiles limit, which can cause spurious test failures.
 TEST_METADATA.kern_descrip_test+= is_exclusive="true"
 PLAIN_TESTS_C+=	execve_overflow
+ATF_TESTS_C+=	eventlog_user_provider_test
+TEST_METADATA.eventlog_user_provider_test+=	required_user="root"
+TEST_METADATA.eventlog_user_provider_test+=	timeout="60"
 ATF_TESTS_C+=	exterr_test
 ATF_TESTS_C+=	fdgrowtable_test
 ATF_TESTS_C+=	getdirentries_test
@@ -166,6 +169,15 @@ CFLAGS.procdesc+=	-I${SRCTOP}/tests
 CFLAGS.ptrace_test+=	-I${SRCTOP}/tests
 
 ATF_TESTS_PYTEST+=	kern_eventlog_test.py
+
+# Unit test for the elog decode-blob interpreter.  It links the interpreter
+# (usr.bin/elog/decode.c) directly and drives it with hand-built blobs, so it
+# needs that source dir on .PATH and both the sys headers (decode-blob format)
+# and the elog dir (decode.h) on the include path.
+ATF_TESTS_C+=		decode_test
+SRCS.decode_test=	decode_test.c decode.c
+CFLAGS.decode_test+=	-I${SRCTOP}/sys -I${SRCTOP}/usr.bin/elog
+.PATH:			${SRCTOP}/usr.bin/elog
 
 WARNS?=	3
 

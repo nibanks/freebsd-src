@@ -153,6 +153,9 @@ _LIBRARIES=	\
 		edit \
 		efivar \
 		elf \
+		elog_user_symbols \
+		elog_source_lines \
+		eventlog \
 		execinfo \
 		fetch \
 		formw \
@@ -364,6 +367,9 @@ _DP_devstat=	kvm
 _DP_dtrace=	ctf elf proc pthread rtld_db xo
 _DP_dwarf=	elf z
 _DP_edit=	tinfow
+_DP_elog_user_symbols=	elf md
+_DP_elog_source_lines=	elf dwarf
+_DP_eventlog=	pthread
 _DP_execinfo=	elf
 .if ${MK_OPENSSL} != "no"
 _DP_fetch=	ssl crypto

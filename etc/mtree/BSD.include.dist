@@ -280,6 +280,8 @@
         readline        tags=package=runtime-dev
         ..
     ..
+    eventlog            tags=package=libeventlog-dev
+    ..
     fs
         cuse
         ..

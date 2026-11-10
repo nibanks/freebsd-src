@@ -1,0 +1,618 @@
+.\"-
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 Netflix, Inc.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd August 31, 2026
+.Dt EVENTLOG_USER 3
+.Os
+.Sh NAME
+.Nm eventlog_provider_create ,
+.Nm eventlog_session_create ,
+.Nm eventlog_session_set_enabled ,
+.Nm eventlog_session_set_filter ,
+.Nm eventlog_session_destroy ,
+.Nm eventlog_provider_destroy ,
+.Nm eventlog_provider_poll ,
+.Nm eventlog_event_write ,
+.Nm eventlog_event_write_at ,
+.Nm eventlog_event_write_gather ,
+.Nm eventlog_event_write_gather_at ,
+.Nm eventlog_user_per_thread_rings_supported
+.Nd user-space eventlog producer library
+.Sh LIBRARY
+.Lb libeventlog
+.Sh SYNOPSIS
+.In sys/eventlog.h
+.Ft "struct eventlog_provider *"
+.Fo eventlog_provider_create
+.Fa "const char *name"
+.Fa "const struct eventlog_provider_config *config"
+.Fc
+.Ft "struct eventlog_session *"
+.Fo eventlog_session_create
+.Fa "struct eventlog_provider *provider"
+.Fa "uint64_t session_id"
+.Fa "bool waitok"
+.Fa "void *create_payload"
+.Fa "size_t create_payload_size"
+.Fc
+.Ft void
+.Fo eventlog_session_set_enabled
+.Fa "struct eventlog_session *session"
+.Fa "int enabled"
+.Fc
+.Ft void
+.Fo eventlog_session_set_filter
+.Fa "struct eventlog_session *session"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fc
+.Ft void
+.Fo eventlog_session_destroy
+.Fa "struct eventlog_session *session"
+.Fc
+.Ft void
+.Fo eventlog_provider_destroy
+.Fa "struct eventlog_provider *provider"
+.Fc
+.Ft int
+.Fo eventlog_provider_poll
+.Fa "struct eventlog_provider *provider"
+.Fc
+.Ft void
+.Fo eventlog_event_write
+.Fa "struct eventlog_session *session"
+.Fa "uint32_t id"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fa "void *buffer"
+.Fa "size_t length"
+.Fc
+.Ft void
+.Fo eventlog_event_write_at
+.Fa "struct eventlog_session *session"
+.Fa "uint32_t id"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fa "void *buffer"
+.Fa "size_t length"
+.Fa "uint64_t timestamp_us"
+.Fc
+.Ft void
+.Fo eventlog_event_write_gather
+.Fa "struct eventlog_session *session"
+.Fa "uint32_t id"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fa "const struct iovec *iov"
+.Fa "int iovcnt"
+.Fc
+.Ft void
+.Fo eventlog_event_write_gather_at
+.Fa "struct eventlog_session *session"
+.Fa "uint32_t id"
+.Fa "enum eventlog_level level"
+.Fa "uint32_t keywords"
+.Fa "const struct iovec *iov"
+.Fa "int iovcnt"
+.Fa "uint64_t timestamp_us"
+.Fc
+.Ft int
+.Fo eventlog_user_per_thread_rings_supported
+.Fa void
+.Fc
+.Sh DESCRIPTION
+The
+.Nm libeventlog
+library lets a user-space process emit events into the kernel
+.Xr eventlog 9
+framework using the same schema, generated header, and
+.Dv _LOG
+macros that in-kernel producers use.
+A schema-generated
+.Aq Ar provider Ns _eventlog.h ,
+when compiled without
+.Dv _KERNEL ,
+pulls in
+.In sys/eventlog.h
+to obtain the
+.Vt "struct eventlog_session"
+handle and the
+.Fn eventlog_event_write
+family that the macros expand to.
+The generated macro is identical in both environments; only the linked
+runtime differs.
+.Ss Scaling model
+The library is built for a process that handles a very large number of
+connections, where
+.Em a connection is a session .
+Two object kinds, with very different costs, make this affordable:
+.Bl -tag -width ".Sy Session" -offset indent
+.It Sy Provider
+A logical event domain, registered once with
+.Fn eventlog_provider_create .
+A provider is the
+.Em only
+thing that consumes a
+.Pa /dev/eventlog
+descriptor, a kernel registration, and an enablement page.
+A process registers a small, fixed set of providers
+.Pq typically one ;
+do not register a provider per connection.
+.It Sy Session
+A cheap per-connection handle created with
+.Fn eventlog_session_create .
+A session owns no descriptor, no mapping, and no buffer: it is just a
+.Fa session_id
+stamped into every record plus a pointer to the effective enablement word.
+A process may hold hundreds of thousands of live sessions.
+.El
+.Pp
+All sessions and providers in the process share
+.Em one
+descriptor.
+By default they also share
+.Em one
+submission ring.
+.Dv EVENTLOG_PROVIDER_PER_THREAD_RINGS
+on the first
+.Fn eventlog_provider_create
+in the process instead gives each writing thread its own SPSC ring
+.Pq 64 KB by default .
+Each record self-describes its
+.Fa provider_id
+and
+.Fa session_id ,
+so the kernel drain demultiplexes per record; there is no
+per-session or per-provider buffer to size or drain.
+The kernel auto-manages its receive-side stream buffers, so a subscriber
+declares nothing
+.Pq see Xr elog 5 .
+.Pp
+.Fn eventlog_provider_create
+registers
+.Fa name
+on the process's shared
+.Pa /dev/eventlog
+channel
+.Pq opening it on first use
+and returns an opaque provider handle.
+Events are emitted through a session derived from the provider with
+.Fn eventlog_session_create ,
+mirroring the kernel two-step in
+.Xr eventlog 9 .
+The
+.Fa config
+argument may be
+.Dv NULL
+to select defaults; otherwise it points at a
+.Vt "struct eventlog_provider_config" :
+.Bl -tag -width ".Va subscribers_changed" -offset indent
+.It Va default_enabled
+Seed value for the
+.Va kern.eventlog. Ns Aq Ar name Ns .default
+sysctl.
+.It Va flags
+Bitmask of
+.Dv EVENTLOG_PROVIDER_*
+bits.
+.Dv EVENTLOG_PROVIDER_AUTO_RATIO
+opts the name into
+.Va kern.eventlog. Ns Aq Ar name Ns .auto_ratio .
+.Dv EVENTLOG_PROVIDER_EXTERNAL_CONTROL
+skips the private control thread;
+the caller must invoke
+.Fn eventlog_provider_poll
+about every 100ms
+so dump, subscriber, and default callbacks still run.
+.Dv EVENTLOG_PROVIDER_PER_THREAD_RINGS
+gives each writing thread its own SPSC submission ring
+instead of the process-wide multi-writer ring.
+The first provider registered in the process sets this; later providers
+on the same channel inherit it.
+This requires a kernel with multi-ring support
+.Pq ring header Dv EVENTLOG_RING_VERSION No >= 3 ,
+which the kernel advertises in the read-only
+.Va kern.eventlog.user_rings_max
+sysctl
+.Pq absent on older kernels .
+On an older kernel the first thread's
+.Dv EVENTLOG_IOCTL_SETUP_RING
+fails with
+.Er EEXIST
+and the whole channel falls back to the shared multi-writer ring, so no
+thread's writes are lost.
+.Fn eventlog_user_per_thread_rings_supported
+reports whether the running kernel supports per-thread rings; a producer
+that statically links libeventlog and may run on an older kernel should
+call it once at startup and set
+.Dv EVENTLOG_PROVIDER_PER_THREAD_RINGS
+only when it returns non-zero.
+.It Va dump_callback , Va dump_callback_arg
+Optional callback invoked when a subscriber requests a state replay
+.Pq the Dv DUMP_STATE subscription flag .
+Emit the provider's current state with the ordinary
+.Fn eventlog_event_write
+family; the library scopes those events to the requesting subscriber.
+.It Va default_changed , Va default_changed_arg
+Optional callback invoked when the provider's
+.Va default
+tunable changes
+.Pq the raw sysctl value is passed through .
+.It Va subscribers_changed , Va subscribers_changed_arg
+Optional callback invoked when the provider crosses the
+zero-to-some/some-to-zero subscriber boundary
+.Pq Fa has_subscribers No true or false ,
+useful for gating expensive bookkeeping when nobody is listening.
+.El
+.Pp
+The callbacks have the same signatures as the in-kernel provider callbacks
+in
+.Xr eventlog 9 :
+each receives the
+.Vt "struct eventlog_provider *"
+handle and its registered
+.Va Ns _arg .
+By default they run on a private per-process background thread.
+With
+.Dv EVENTLOG_PROVIDER_EXTERNAL_CONTROL
+they run on the thread that calls
+.Fn eventlog_provider_poll .
+They are optional, and the hot paths
+.Pq the Dv _ENABLED No gate and event writes
+never wait on that dispatch.
+.Pp
+.Fn eventlog_provider_create
+also
+.Xr mmap 2 Ns s
+the provider's kernel-maintained enablement page out of the shared channel
+mapping.
+The kernel keeps the leading words of that page
+.Pq Va effective_level , Va effective_keywords
+up to date with the aggregated interest of all current subscribers.
+A session reads those words through an internal
+.Va eff
+pointer, which the generated
+.Dv _ENABLED
+macro dereferences.
+When no subscriber is interested the macro neither packs the payload nor
+enters the kernel, so a disabled event costs only the indirection plus a
+pair of loads.
+If the running kernel predates mmap support the library transparently
+falls back to a heap-backed, always-enabled provider; per-subscriber
+filtering still occurs in the kernel on push.
+.Ss Per-connection sessions
+.Fn eventlog_session_create
+creates a cheap session on
+.Fa provider ,
+stamping
+.Fa session_id
+into every record it emits so a subscriber can group one connection's
+events.
+The
+.Fa waitok ,
+.Fa create_payload ,
+and
+.Fa create_payload_size
+arguments mirror the kernel
+.Xr eventlog 9
+signature and are presently ignored by the user runtime
+.Pq it always heap-allocates and emits no SESSION_CREATE event .
+It performs no system call and allocates only the small handle, so it is
+suitable on a per-connection basis.
+By default a new session inherits the provider's current enablement.
+The
+.Va kern.eventlog. Ns Aq Ar name Ns .auto_ratio
+sysctl does not apply to user providers: the kernel never sees user-space
+session creates, so a producer that wants 1-in-N sampling selects sessions
+itself and drives
+.Fn eventlog_session_set_enabled .
+.Fn eventlog_session_set_enabled
+with
+.Fa enabled
+zero silences a session regardless of subscriber interest;
+.Fa enabled
+non-zero returns it to inheriting the provider's kernel-published state.
+.Fn eventlog_session_set_filter
+pins an explicit
+.Fa level
+and
+.Fa keywords
+on the session, ignoring provider state.
+All three are O(1) pointer repoints with no system call and no fan-out, so
+they are cheap to call as a connection's logging policy changes.
+.Fn eventlog_session_destroy
+releases a session, freeing the small handle.
+.Pp
+.Fn eventlog_event_write
+writes one event whose scalar payload is
+.Fa length
+bytes at
+.Fa buffer
+into the channel's submission ring.
+.Fn eventlog_event_write_gather
+is the variable-length form, gathering
+.Fa iovcnt
+.Fa iov
+segments into a single payload.
+The
+.Fa id ,
+.Fa level ,
+and
+.Fa keywords
+arguments are supplied by the generated macro and drive per-subscriber
+filtering in the kernel.
+The
+.Fn ...\&_at
+variants take an explicit
+.Fa timestamp_us
+.Pq microseconds on Dv CLOCK_UPTIME ;
+passing zero, as the plain variants do, timestamps the event at the moment
+it is written.
+Timestamps are forced strictly increasing across the shared ring so the
+kernel can merge user events into subscriber buffers without reordering.
+.Pp
+Events from every session and provider on a channel are written into the
+.Em one
+shared, memory-mapped submission ring and published with a release store;
+no system call is issued on the steady-state write path.
+The kernel drains the ring lazily from the subscriber
+.Xr read 2
+path and a periodic poll, re-validating and fanning every record out to all
+current subscribers, so a consumer of this API never has to manage delivery
+or flush anything: each write publishes the ring head with a release store,
+and the library exposes no client-visible buffering to drain.
+The library issues an occasional drain
+.Pq a single Xr ioctl 2
+only when the kernel publishes a hint in the ring header that one is
+worthwhile: a subscriber is blocked waiting for data, or the ring has crossed
+a high-water mark while a subscriber is attached.
+This bounds delivery latency and ring drops without a system call per event.
+.Fn eventlog_provider_destroy
+unregisters a provider.
+Destroying the last provider in a process publishes any pending writes,
+unmaps the ring, and closes the shared channel.
+The provider and channel are freed once every session derived from the
+provider has also been destroyed, so destroy order does not matter.
+.Pp
+The write functions return
+.Vt void
+and silently drop events on error, matching the kernel producer's
+fire-and-forget semantics; payloads larger than
+.Dv UINT16_MAX
+bytes are dropped.
+If the submission ring is full
+.Pq the kernel has not drained it fast enough ,
+further writes are dropped and counted in the ring's
+.Va dropped
+header field rather than blocking or overwriting unconsumed records.
+.Ss Concurrency and fork
+A session may be used for concurrent
+.Dv _LOG
+from many threads.
+By default, writers reserve space in the shared buffer with a lock-free atomic
+compare-and-swap, copy their payload in parallel, and commit in reservation
+order, so parallel producers neither lose nor corrupt records and never
+serialize on a lock.
+A writer whose predecessor has not yet published the ring's head
+spins, yielding the CPU, until that commit lands; the waiter keeps its
+reservation for the whole wait so a preempted predecessor still unblocks
+later
+.Dv _LOG
+calls when it commits.
+If a predecessor is dead in the copy window
+.Pq ptrace-stopped, or cancelled mid-copy
+later writers on that channel wait until the process exits.
+With
+.Dv EVENTLOG_PROVIDER_PER_THREAD_RINGS
+each writing thread publishes into its own ring with a plain store of
+.Va head ;
+events from different threads are distinct streams that the kernel merge
+orders by timestamp, and per-thread emission order is preserved.
+Distinct sessions are independent and need no external locking.
+.Pp
+The library runs one background thread per process
+.Pq created on the first Fn eventlog_provider_create , No joined on the last destroy
+that owns the kernel control channel, unless a provider is created with
+.Dv EVENTLOG_PROVIDER_EXTERNAL_CONTROL .
+In that mode the caller must invoke
+.Fn eventlog_provider_poll
+about every 100ms;
+that call dispatches the same callbacks on the calling thread and reports
+session counts about once a second.
+Concurrent
+.Fn eventlog_provider_poll
+calls on the same process are serialized.
+.Xr fork 2
+is not supported in the child without re-opening: that thread does not
+survive the fork, and a
+.Xr pthread_atfork 3
+child handler marks the inherited submission ring unusable so the child's
+writes drop rather than racing the parent's in-flight state.
+A child that needs to produce events must call
+.Fn eventlog_provider_create
+afresh, which builds a fresh channel and, unless using
+.Dv EVENTLOG_PROVIDER_EXTERNAL_CONTROL ,
+a new control thread.
+.Sh BUILD INTEGRATION
+A client gets the in-kernel workflow with one line.
+Add to the program or library
+.Xr make 1
+file:
+.Bd -literal -offset indent
+EVENTLOG_SCHEMA=	myprov_eventlog_schema.src
+.Ed
+.Pp
+This generates
+.Aq Ar myprov Ns _eventlog.h
+from the schema, adds the include path, and links
+.Nm libeventlog
+automatically
+.Pq see Pa share/mk/bsd.eventlog.mk .
+The source then only needs to
+.Bd -literal -offset indent
+#include <eventlog/myprov_eventlog.h>
+.Ed
+.Pp
+and call the generated
+.No MYPROV_EVENTLOG_ Ns Aq Ar EVENT Ns _LOG
+macro.
+.Sh RETURN VALUES
+.Fn eventlog_provider_create
+returns a provider handle and
+.Fn eventlog_session_create
+returns a session handle, or
+.Dv NULL
+with
+.Va errno
+set on failure.
+.Fn eventlog_provider_poll
+returns the number of control events dispatched, or
+.Li -1
+with
+.Va errno
+set on failure.
+.Sh ERRORS
+.Fn eventlog_provider_create
+may fail with any error returned by
+.Xr open 2 ,
+.Xr ioctl 2 ,
+or
+.Xr mmap 2 ,
+and in addition:
+.Bl -tag -width Er
+.It Bq Er EINVAL
+.Fa name
+is
+.Dv NULL ,
+empty, or too long,
+or a provider in this process already registered with a different control model
+.Pq every provider must agree on Dv EVENTLOG_PROVIDER_EXTERNAL_CONTROL .
+.El
+.Pp
+.Fn eventlog_provider_poll
+may fail with any error returned by
+.Xr ioctl 2 ,
+and in addition:
+.Bl -tag -width Er
+.It Bq Er EINVAL
+.Fa provider
+is
+.Dv NULL .
+.It Bq Er EBUSY
+The library's control thread is already running.
+.El
+.Sh EXAMPLES
+Given
+.Pa myprov_eventlog_schema.src
+defining a provider
+.Dq myprov
+with a scalar event
+.Dq startup :
+.Bd -literal -offset indent
+#include <eventlog/myprov_eventlog.h>
+
+struct eventlog_provider *prov;
+struct eventlog_session *conn;
+
+/* Once per process: register the provider. */
+prov = eventlog_provider_create("myprov", NULL);
+if (prov == NULL)
+	err(1, "eventlog_provider_create");
+
+/* Per connection: a cheap session keyed by the connection id. */
+conn = eventlog_session_create(prov, connection_id, false, NULL, 0);
+if (conn == NULL)
+	err(1, "eventlog_session_create");
+
+struct myprov_startup ev = { .pid = getpid() };
+MYPROV_EVENTLOG_STARTUP_LOG(conn, &ev);
+
+eventlog_session_destroy(conn);	/* when the connection ends */
+eventlog_provider_destroy(prov);	/* at process shutdown */
+.Ed
+.Sh SECURITY CONSIDERATIONS
+Producing events does
+.Em not
+require privilege.
+.Pa /dev/eventlog
+is world readable and writable, and the kernel validates and bounce-copies
+every record drained from a provider's submission ring, so an unprivileged
+process
+.Pq for example an
+.Xr nginx 8
+worker running as
+.Dq www
+may register a provider and emit events without running as root.
+.Pp
+Reading the event stream is privileged: a subscriber observes every
+provider's events system-wide, so the
+.Dv EVENTLOG_IOCTL_CREATE
+subscribe path is restricted to the super-user and members of the
+.Dq operator
+group
+.Pq see Xr elog 1 .
+A producer's wired submission-ring memory is charged against its real user id
+and capped by the
+.Va kern.eventlog.user_ring_max_bytes_per_uid
+sysctl, bounding the kernel memory an untrusted producer can pin.
+.Sh BUILDING
+In-tree programs set
+.Va EVENTLOG_SCHEMA
+in the Makefile;
+.Pa share/mk/bsd.eventlog.mk
+generates the producer header and links this library.
+Ports set
+.Va EVENTLOG_SCHEMA
+and include
+.Pa ports/Mk/bsd.eventlog.port.mk
+for the same header generation.
+The library installs
+.Pa libeventlog.pc
+for pkg-config.
+The schema compiler
+.Pa eventlog_gen.awk
+is installed in
+.Pa /usr/share/eventlog
+and advertised as the
+.Va eventlog_gen
+pkg-config variable.
+.Sh SEE ALSO
+.Xr elog 1 ,
+.Xr ioctl 2 ,
+.Xr mmap 2 ,
+.Xr pthread_atfork 3 ,
+.Xr elog 5 ,
+.Xr eventlog 9
+.Sh HISTORY
+The
+.Nm libeventlog
+library first appeared in
+.Fx 16.0 .
+.Sh AUTHORS
+The
+.Nm libeventlog
+library was developed by
+.An Netflix, Inc .
