@@ -38,6 +38,7 @@
 #include <sys/mutex.h>
 #include <sys/pcpu.h>
 #include <sys/pmc.h>
+#include <sys/pmc_sample.h>
 #include <sys/pmckern.h>
 #include <sys/smp.h>
 #include <sys/sysctl.h>
@@ -47,6 +48,7 @@
 #include <sys/exterrvar.h>
 
 #include <machine/atomic.h>
+#include <machine/clock.h>
 #include <machine/cpu.h>
 #include <machine/cpufunc.h>
 #include <machine/md_var.h>
@@ -54,6 +56,75 @@
 #include <machine/smp.h>
 
 #define	OVERFLOW_WAIT_COUNT	50
+
+/* Rescale reload by APERF/MPERF to keep a wall-clock period. */
+DPCPU_DEFINE_STATIC(uint64_t, amd_reload_last_aperf);
+DPCPU_DEFINE_STATIC(uint64_t, amd_reload_last_mperf);
+
+static void
+amd_reload_freq_baseline_reset(int cpu)
+{
+
+	DPCPU_ID_SET(cpu, amd_reload_last_aperf, rdmsr(MSR_APERF));
+	DPCPU_ID_SET(cpu, amd_reload_last_mperf, rdmsr(MSR_MPERF));
+}
+
+static uint64_t
+amd_reload_freq_adjust(int cpu, uint64_t base_reload)
+{
+	uint64_t aperf, mperf, daperf, dmperf, adjusted, eff_mhz;
+	int extra_bits;
+
+	if (!tsc_perf_stat) {
+		pmc_sample_set_freq(cpu, 0, false);
+		return (base_reload);
+	}
+
+	aperf = rdmsr(MSR_APERF);
+	mperf = rdmsr(MSR_MPERF);
+	daperf = aperf - DPCPU_ID_GET(cpu, amd_reload_last_aperf);
+	dmperf = mperf - DPCPU_ID_GET(cpu, amd_reload_last_mperf);
+	DPCPU_ID_SET(cpu, amd_reload_last_aperf, aperf);
+	DPCPU_ID_SET(cpu, amd_reload_last_mperf, mperf);
+
+	if (dmperf == 0 || daperf == 0) {
+		pmc_sample_set_freq(cpu, 0, false);
+		return (base_reload);
+	}
+
+	/*
+	 * tsc_freq * daperf can overflow uint64_t on a high-frequency CPU
+	 * with a long sampling interval; dividing tsc_freq by 1000000 first
+	 * keeps the product in range at the cost of <1% error.
+	 */
+	eff_mhz = (tsc_freq / 1000000 * daperf) / dmperf;
+	pmc_sample_set_freq(cpu, (uint16_t)MIN(eff_mhz, UINT16_MAX), true);
+
+	/*
+	 * base_reload * daperf has the same overflow risk as tsc_freq *
+	 * daperf above, but there's no /1000000 term to hoist here, and a
+	 * 128-bit division needs __udivti3, which isn't linked into the
+	 * kernel (unlike a 128-bit multiply, which lowers to a plain mulq).
+	 * Downscale daperf/dmperf together first: that preserves their
+	 * ratio (the turbo scaling factor) while shrinking daperf enough
+	 * that the 64-bit multiply can't overflow.
+	 */
+	extra_bits = flsll(base_reload) + flsll(daperf) - 64;
+	if (extra_bits >= 64) {
+		pmc_sample_set_freq(cpu, 0, false);
+		return (base_reload);
+	}
+	if (extra_bits > 0) {
+		daperf >>= extra_bits;
+		dmperf >>= extra_bits;
+		if (dmperf == 0)
+			dmperf = 1;
+	}
+	adjusted = (base_reload * daperf) / dmperf;
+	adjusted = MAX(adjusted, MAX(1, base_reload / 4));
+	adjusted = MIN(adjusted, 4 * base_reload);
+	return (adjusted);
+}
 
 DPCPU_DEFINE_STATIC(uint32_t, nmi_counter);
 
@@ -744,6 +815,9 @@ amd_start_pmc(int cpu __diagused, int ri, struct pmc *pm)
 
 	PMCDBG1(MDP, STA, 2, "amd-start config=0x%x", config);
 
+	if (PMC_IS_KERNEL_SAMPLER(pm) && tsc_perf_stat)
+		amd_reload_freq_baseline_reset(cpu);
+
 	wrmsr(pd->pm_evsel, config);
 	return (0);
 }
@@ -977,6 +1051,8 @@ amd_intr(struct trapframe *tf)
 		evsel   = amd_pmcdesc[i].pm_evsel;
 		perfctr = amd_pmcdesc[i].pm_perfctr;
 		v       = pm->pm_sc.pm_reloadcount;
+		if (PMC_IS_KERNEL_SAMPLER(pm))
+			v = amd_reload_freq_adjust(cpu, v);
 		config  = rdmsr(evsel);
 
 
@@ -1886,4 +1962,26 @@ pmc_amd_finalize(struct pmc_mdep *md)
 
 	free(amd_pmcdesc, M_PMC);
 	amd_pmcdesc = NULL;
+}
+
+/*
+ * Resolve a pmc_sample(9) logical event (see sys/pmc_sample.h) to a K8
+ * class/config, for the in-kernel sampling KPI in hwpmc_kapi.c.
+ */
+int
+pmc_amd_resolve_sample_event(enum pmc_sample_event ev,
+    struct pmc_op_pmcallocate *pa)
+{
+
+	switch (ev) {
+	case PMC_SAMPLE_EV_CPU_CYCLES:
+		/* K8 BU_CPU_CLK_UNHALTED. */
+		pa->pm_class = PMC_CLASS_K8;
+		pa->pm_md.pm_amd.pm_amd_config = AMD_PMC_TO_EVENTMASK(0x76) |
+		    AMD_PMC_USR | AMD_PMC_OS | AMD_PMC_INT;
+		pa->pm_md.pm_amd.pm_amd_sub_class = PMC_AMD_SUB_CLASS_CORE;
+		return (0);
+	default:
+		return (ENOTSUP);
+	}
 }

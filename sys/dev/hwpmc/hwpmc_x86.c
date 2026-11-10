@@ -34,6 +34,7 @@
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/pmc.h>
+#include <sys/pmc_sample.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -269,4 +270,21 @@ pmc_md_finalize(struct pmc_mdep *md)
 		pmc_intel_finalize(md);
 	else
 		KASSERT(0, ("[x86,%d] Unknown vendor", __LINE__));
+}
+
+/*
+ * Resolve a pmc_sample(9) logical event (see sys/pmc_sample.h) to a
+ * vendor-specific class/config, for the in-kernel sampling KPI in
+ * hwpmc_kapi.c.
+ */
+int
+pmc_md_resolve_sample_event(enum pmc_sample_event ev,
+    struct pmc_op_pmcallocate *pa)
+{
+
+	if (cpu_vendor_id == CPU_VENDOR_AMD || cpu_vendor_id == CPU_VENDOR_HYGON)
+		return (pmc_amd_resolve_sample_event(ev, pa));
+	else if (cpu_vendor_id == CPU_VENDOR_INTEL)
+		return (pmc_intel_resolve_sample_event(ev, pa));
+	return (ENOTSUP);
 }

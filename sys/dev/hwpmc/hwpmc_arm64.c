@@ -41,6 +41,8 @@
 static int arm64_npmcs;
 static bool arm64_64bit_events __read_mostly = false;
 
+#define	ARM64_PMC_CALIBRATE_USEC	1000
+
 struct arm64_event_code_map {
 	enum pmc_event	pe_ev;
 	uint8_t		pe_code;
@@ -51,9 +53,118 @@ struct arm64_event_code_map {
  */
 struct arm64_cpu {
 	struct pmc_hw   *pc_arm64pmcs;
+	uint64_t	 pc_cycle_freq;
 };
 
 static struct arm64_cpu **arm64_pcpu;
+
+static __inline void arm64_counter_disable(unsigned int pmc);
+static __inline void arm64_counter_enable(unsigned int pmc);
+
+/*
+ * Measure CPU_CYCLES on a free programmable PMU counter against the
+ * architectural timer.  Some ACPI systems do not populate pc_clock, but the
+ * in-kernel sampler still needs a cycle frequency to translate a requested
+ * sample rate into a reload.
+ */
+int
+pmc_md_estimate_cycle_freq(int cpu, uint64_t *freq)
+{
+	struct arm64_cpu *pac;
+	struct pmc_binding pb;
+	struct pmc_hw *phw;
+	uint64_t ccnt0, ccnt1, config, old_count, old_select, old_type;
+	uint64_t timer0, timer1, timer_freq;
+	register_t s;
+	int error, ri;
+
+	if (freq == NULL || cpu < 0 || cpu >= pmc_cpu_max() ||
+	    !pmc_cpu_is_active(cpu))
+		return (EINVAL);
+	pac = arm64_pcpu[cpu];
+	if (pac == NULL)
+		return (ENXIO);
+	if (pac->pc_cycle_freq != 0) {
+		*freq = pac->pc_cycle_freq;
+		return (0);
+	}
+
+	error = 0;
+	pmc_save_cpu_binding(&pb);
+	pmc_select_cpu(cpu);
+	timer_freq = READ_SPECIALREG(cntfrq_el0);
+	if (timer_freq == 0) {
+		error = ENXIO;
+		goto out;
+	}
+
+	for (ri = 0; ri < arm64_npmcs; ri++) {
+		phw = &pac->pc_arm64pmcs[ri];
+		if (phw->phw_pmc == NULL)
+			break;
+	}
+	if (ri == arm64_npmcs) {
+		error = EBUSY;
+		goto out;
+	}
+
+	/*
+	 * Program the free row for CPU_CYCLES.  Keep each pmselr_el0 window
+	 * short and interrupt-disabled: arm64_intr() also writes pmselr_el0
+	 * when reloading other live sampling counters on this CPU.
+	 */
+	config = 0x11;
+	if (in_vhe())
+		config |= PMEVTYPER_NSH;
+	s = intr_disable();
+	old_select = READ_SPECIALREG(pmselr_el0);
+	WRITE_SPECIALREG(pmselr_el0, ri);
+	isb();
+	old_type = READ_SPECIALREG(pmxevtyper_el0);
+	old_count = READ_SPECIALREG(pmxevcntr_el0);
+	arm64_counter_disable(ri);
+	WRITE_SPECIALREG(pmxevtyper_el0, config);
+	WRITE_SPECIALREG(pmxevcntr_el0, 0);
+	WRITE_SPECIALREG(pmovsclr_el0, 1U << ri);
+	arm64_counter_enable(ri);
+	WRITE_SPECIALREG(pmselr_el0, ri);
+	isb();
+	ccnt0 = READ_SPECIALREG(pmxevcntr_el0);
+	intr_restore(s);
+	timer0 = get_cyclecount();
+	DELAY(ARM64_PMC_CALIBRATE_USEC);
+	s = intr_disable();
+	WRITE_SPECIALREG(pmselr_el0, ri);
+	isb();
+	ccnt1 = READ_SPECIALREG(pmxevcntr_el0);
+	intr_restore(s);
+	timer1 = get_cyclecount();
+	s = intr_disable();
+	WRITE_SPECIALREG(pmselr_el0, ri);
+	isb();
+	arm64_counter_disable(ri);
+	WRITE_SPECIALREG(pmxevtyper_el0, old_type);
+	WRITE_SPECIALREG(pmxevcntr_el0, old_count);
+	WRITE_SPECIALREG(pmovsclr_el0, 1U << ri);
+	WRITE_SPECIALREG(pmselr_el0, old_select);
+	isb();
+	intr_restore(s);
+
+	if (timer1 == timer0 || ccnt1 == ccnt0) {
+		error = ENXIO;
+		goto out;
+	}
+	pac->pc_cycle_freq = (ccnt1 - ccnt0) * timer_freq /
+	    (timer1 - timer0);
+	if (pac->pc_cycle_freq == 0) {
+		error = ENXIO;
+		goto out;
+	}
+	*freq = pac->pc_cycle_freq;
+out:
+	pmc_restore_cpu_binding(&pb);
+	return (error);
+}
 
 /*
  * Interrupt Enable Set Register

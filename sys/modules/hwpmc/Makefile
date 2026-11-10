@@ -24,6 +24,7 @@ SRCS+=	hwpmc_amd.c \
 	hwpmc_core.c \
 	hwpmc_ibs.c \
 	hwpmc_intel.c \
+	hwpmc_kapi.c \
 	hwpmc_perf.c \
 	hwpmc_rapl.c \
 	hwpmc_tsc.c \
@@ -39,6 +40,7 @@ SRCS+=	hwpmc_amd.c \
 	hwpmc_core.c \
 	hwpmc_ibs.c \
 	hwpmc_intel.c \
+	hwpmc_kapi.c \
 	hwpmc_rapl.c \
 	hwpmc_tsc.c \
 	hwpmc_uncore.c \

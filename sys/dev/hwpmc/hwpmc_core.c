@@ -32,11 +32,13 @@
 
 #include <sys/param.h>
 #include <sys/bus.h>
+#include <sys/pcpu.h>
 #include <sys/pmc.h>
 #include <sys/pmckern.h>
 #include <sys/smp.h>
 #include <sys/systm.h>
 
+#include <machine/clock.h>
 #include <machine/intr_machdep.h>
 #include <x86/apicvar.h>
 #include <machine/cpu.h>
@@ -413,6 +415,49 @@ iaf_release_pmc(int cpu, int ri, struct pmc *pmc)
 	return (0);
 }
 
+/* Report effective MHz from APERF/MPERF. */
+DPCPU_DEFINE_STATIC(uint64_t, iaf_freq_last_aperf);
+DPCPU_DEFINE_STATIC(uint64_t, iaf_freq_last_mperf);
+
+static void
+iaf_freq_baseline_reset(int cpu)
+{
+
+	DPCPU_ID_SET(cpu, iaf_freq_last_aperf, rdmsr(MSR_APERF));
+	DPCPU_ID_SET(cpu, iaf_freq_last_mperf, rdmsr(MSR_MPERF));
+}
+
+static void
+iaf_freq_report(int cpu)
+{
+	uint64_t aperf, mperf, daperf, dmperf, eff_mhz;
+
+	if (!tsc_perf_stat) {
+		pmc_sample_set_freq(cpu, 0, false);
+		return;
+	}
+
+	aperf = rdmsr(MSR_APERF);
+	mperf = rdmsr(MSR_MPERF);
+	daperf = aperf - DPCPU_ID_GET(cpu, iaf_freq_last_aperf);
+	dmperf = mperf - DPCPU_ID_GET(cpu, iaf_freq_last_mperf);
+	DPCPU_ID_SET(cpu, iaf_freq_last_aperf, aperf);
+	DPCPU_ID_SET(cpu, iaf_freq_last_mperf, mperf);
+
+	if (dmperf == 0 || daperf == 0) {
+		pmc_sample_set_freq(cpu, 0, false);
+		return;
+	}
+
+	/*
+	 * tsc_freq * daperf can overflow uint64_t on a high-frequency CPU
+	 * with a long sampling interval; dividing tsc_freq by 1000000 first
+	 * keeps the product in range at the cost of <1% error.
+	 */
+	eff_mhz = (tsc_freq / 1000000 * daperf) / dmperf;
+	pmc_sample_set_freq(cpu, (uint16_t)MIN(eff_mhz, UINT16_MAX), true);
+}
+
 static int
 iaf_start_pmc(int cpu, int ri, struct pmc *pm)
 {
@@ -424,6 +469,9 @@ iaf_start_pmc(int cpu, int ri, struct pmc *pm)
 	    ("[core,%d] illegal row-index %d", __LINE__, ri));
 
 	PMCDBG2(MDP,STA,1,"iaf-start cpu=%d ri=%d", cpu, ri);
+
+	if (PMC_IS_KERNEL_SAMPLER(pm) && tsc_perf_stat)
+		iaf_freq_baseline_reset(cpu);
 
 	cc = core_pcpu[cpu];
 	cc->pc_iafctrl |= pm->pm_md.pm_iaf.pm_iaf_ctrl;
@@ -1103,6 +1151,9 @@ core2_intr(struct trapframe *tf)
 		if (pm == NULL || pm->pm_state != PMC_STATE_RUNNING ||
 		    !PMC_IS_SAMPLING_MODE(PMC_TO_MODE(pm)))
 			continue;
+
+		if (PMC_IS_KERNEL_SAMPLER(pm))
+			iaf_freq_report(cpu);
 
 		error = pmc_process_interrupt(PMC_HR, pm, tf);
 		if (__predict_false(error))

@@ -150,8 +150,8 @@ static eventhandler_tag	pmc_exit_tag, pmc_fork_tag, pmc_kld_load_tag,
 /* Module statistics */
 struct pmc_driverstats pmc_stats;
 
-/* Machine/processor dependent operations */
-static struct pmc_mdep  *md;
+/* Machine/processor dependent operations; shared with hwpmc_kapi.c */
+struct pmc_mdep  *md;
 
 /*
  * Hash tables mapping owner processes and target threads to PMCs.
@@ -212,10 +212,8 @@ static int	pmc_add_sample(ring_type_t ring, struct pmc *pm,
 static void	pmc_add_thread_descriptors_from_proc(struct proc *p,
     struct pmc_process *pp);
 static int	pmc_attach_process(struct proc *p, struct pmc *pm);
-static struct pmc *pmc_allocate_pmc_descriptor(void);
 static struct pmc_owner *pmc_allocate_owner_descriptor(struct proc *p);
 static int	pmc_attach_one_process(struct proc *p, struct pmc *pm);
-static bool	pmc_can_allocate_row(int ri, enum pmc_mode mode);
 static bool	pmc_can_allocate_rowindex(struct proc *p, unsigned int ri,
     int cpu);
 static void	pmc_capture_user_callchain(int cpu, int soft,
@@ -225,7 +223,6 @@ static int	pmc_detach_process(struct proc *p, struct pmc *pm);
 static int	pmc_detach_one_process(struct proc *p, struct pmc *pm,
     int flags);
 static void	pmc_destroy_owner_descriptor(struct pmc_owner *po);
-static void	pmc_destroy_pmc_descriptor(struct pmc *pm);
 static void	pmc_destroy_process_descriptor(struct pmc_process *pp);
 static void	pmc_reclaim_pmc_from_cpu(struct pmc *pm,
     struct pmc_process *pp, int cpu);
@@ -265,8 +262,6 @@ static void	pmc_process_thread_userret(struct thread *td);
 static void	pmc_release_pmc_descriptor(struct pmc *pmc);
 static void	pmc_remove_owner(struct pmc_owner *po);
 static void	pmc_remove_process_descriptor(struct pmc_process *pp);
-static int	pmc_start(struct pmc *pm);
-static int	pmc_stop(struct pmc *pm);
 static int	pmc_syscall_handler(struct thread *td, void *syscall_args);
 static struct pmc_thread *pmc_thread_descriptor_pool_alloc(void);
 static void	pmc_thread_descriptor_pool_drain(void);
@@ -383,9 +378,9 @@ SYSCTL_INT(_kern_hwpmc, OID_AUTO, threadfreelist_max, CTLFLAG_RW,
     "maximum number of available thread entries before freeing some");
 
 /*
- * kern.hwpmc.mincount -- minimum sample count
+ * kern.hwpmc.mincount -- minimum sample count; shared with hwpmc_kapi.c
  */
-static u_int pmc_mincount = 1000;
+u_int pmc_mincount = 1000;
 SYSCTL_INT(_kern_hwpmc, OID_AUTO, mincount, CTLFLAG_RWTUN,
     &pmc_mincount, 0,
     "minimum count for sampling counters");
@@ -614,9 +609,9 @@ pmc_debugflags_sysctl_handler(SYSCTL_HANDLER_ARGS)
 
 /*
  * Map a row index to a classdep structure and return the adjusted row
- * index for the PMC class index.
+ * index for the PMC class index.  Shared with hwpmc_kapi.c.
  */
-static struct pmc_classdep *
+struct pmc_classdep *
 pmc_ri_to_classdep(struct pmc_mdep *md __unused, int ri, int *adjri)
 {
 	struct pmc_classdep *pcd;
@@ -2726,9 +2721,10 @@ pmc_find_owner_descriptor(struct proc *p)
 }
 
 /*
- * Allocate a pmc descriptor and initialize its fields.
+ * Allocate a pmc descriptor and initialize its fields.  Shared with
+ * hwpmc_kapi.c.
  */
-static struct pmc *
+struct pmc *
 pmc_allocate_pmc_descriptor(void)
 {
 	struct pmc *pmc;
@@ -2743,9 +2739,9 @@ pmc_allocate_pmc_descriptor(void)
 }
 
 /*
- * Destroy a pmc descriptor.
+ * Destroy a pmc descriptor.  Shared with hwpmc_kapi.c.
  */
-static void
+void
 pmc_destroy_pmc_descriptor(struct pmc *pm)
 {
 
@@ -2765,7 +2761,8 @@ pmc_destroy_pmc_descriptor(struct pmc *pm)
 	free(pm, M_PMC);
 }
 
-static void
+/* Shared with hwpmc_kapi.c. */
+void
 pmc_wait_for_pmc_idle(struct pmc *pm)
 {
 #ifdef INVARIANTS
@@ -2789,6 +2786,42 @@ pmc_wait_for_pmc_idle(struct pmc *pm)
 #endif
 		pmc_force_context_switch();
 	}
+}
+
+/*
+ * Row-disposition accessors for hwpmc_kapi.c: pmc_pmcdisp[] itself
+ * stays file-local since PMC_ROW_DISP_IS_*() elsewhere assume so.
+ */
+void
+pmc_mark_row_standalone(int ri)
+{
+
+	PMC_MARK_ROW_STANDALONE(ri);
+}
+
+void
+pmc_unmark_row_standalone(int ri)
+{
+
+	PMC_UNMARK_ROW_STANDALONE(ri);
+}
+
+/*
+ * pmc_ss_owners insert/remove for hwpmc_kapi.c: pmc_ss_owners is a
+ * CK_LIST_HEAD(, pmc_owner), an anonymous type that can't be extern'd.
+ */
+void
+pmc_ss_owner_link(struct pmc_owner *po)
+{
+
+	CK_LIST_INSERT_HEAD(&pmc_ss_owners, po, po_ssnext);
+}
+
+void
+pmc_ss_owner_unlink(struct pmc_owner *po)
+{
+
+	CK_LIST_REMOVE(po, po_ssnext);
 }
 
 /*
@@ -3043,9 +3076,9 @@ pmc_can_allocate_rowindex(struct proc *p, unsigned int ri, int cpu)
 
 /*
  * Check if a given PMC at row index 'ri' can be currently used in
- * mode 'mode'.
+ * mode 'mode'.  Shared with hwpmc_kapi.c.
  */
-static bool
+bool
 pmc_can_allocate_row(int ri, enum pmc_mode mode)
 {
 	enum pmc_disp disp;
@@ -3143,9 +3176,9 @@ pmc_find_pmc(pmc_id_t pmcid, struct pmc **pmc)
 }
 
 /*
- * Start a PMC.
+ * Start a PMC.  Shared with hwpmc_kapi.c.
  */
-static int
+int
 pmc_start(struct pmc *pm)
 {
 	struct pmc_binding pb;
@@ -3268,9 +3301,9 @@ pmc_start(struct pmc *pm)
 }
 
 /*
- * Stop a PMC.
+ * Stop a PMC.  Shared with hwpmc_kapi.c.
  */
-static int
+int
 pmc_stop(struct pmc *pm)
 {
 	struct pmc_binding pb;
@@ -3340,7 +3373,8 @@ pmc_stop(struct pmc *pm)
 	return (error);
 }
 
-static struct pmc_classdep *
+/* Shared with hwpmc_kapi.c. */
+struct pmc_classdep *
 pmc_class_to_classdep(enum pmc_class class)
 {
 	int n;
@@ -4821,6 +4855,20 @@ pmc_multipart_copydata(struct pmc_sample *ps, struct pmc_multipart *mp)
 }
 
 /*
+ * Effective MHz stashed by the PMI handler for pmc_add_sample().
+ */
+DPCPU_DEFINE_STATIC(uint16_t, pmc_sample_freq_mhz);
+DPCPU_DEFINE_STATIC(bool, pmc_sample_freq_valid);
+
+void
+pmc_sample_set_freq(int cpu, uint16_t freq_mhz, bool valid)
+{
+
+	DPCPU_ID_SET(cpu, pmc_sample_freq_mhz, freq_mhz);
+	DPCPU_ID_SET(cpu, pmc_sample_freq_valid, valid);
+}
+
+/*
  * Find a free slot in the per-cpu array of samples and capture the
  * current callchain there.  If a sample was successfully added, a bit
  * is set in mask 'pmc_cpumask' denoting that the DO_SAMPLES hook
@@ -4875,6 +4923,13 @@ pmc_add_sample(ring_type_t ring, struct pmc *pm, struct trapframe *tf,
 	ps->ps_ticks = ticks;
 	ps->ps_cpu = cpu;
 	ps->ps_flags = inuserspace ? PMC_CC_F_USERSPACE : 0;
+	if (PMC_IS_KERNEL_SAMPLER(pm)) {
+		ps->ps_freq_mhz = DPCPU_GET(pmc_sample_freq_mhz);
+		ps->ps_freq_valid = DPCPU_GET(pmc_sample_freq_valid);
+	} else {
+		ps->ps_freq_mhz = 0;
+		ps->ps_freq_valid = 0;
+	}
 	ps->ps_nsamples_actual = 0;
 
 	callchaindepth = (pm->pm_flags & PMC_F_CALLCHAIN) ?
@@ -5154,6 +5209,10 @@ pmc_process_samples(int cpu, ring_type_t ring)
 				td = FIRST_THREAD_IN_PROC(po->po_owner);
 				addupc_intr(td, ps->ps_pc[0], 1);
 			}
+#if defined(__amd64__) || defined(__i386__) || defined(__aarch64__)
+		} else if ((po->po_flags & PMC_PO_KERNEL_SAMPLER) != 0) {
+			pmc_sampler_deliver(pm, ps);
+#endif
 		} else
 			pmclog_process_callchain(pm, ps);
 

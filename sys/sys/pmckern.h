@@ -268,4 +268,26 @@ void pmc_soft_ev_deregister(struct pmc_soft *ps);
 struct pmc_soft *pmc_soft_ev_acquire(enum pmc_event ev);
 void pmc_soft_ev_release(struct pmc_soft *ps);
 
+/*
+ * hwpmc_mod.c internals shared with the in-kernel sampling KPI
+ * (hwpmc_kapi.c, see sys/pmc_sample.h).
+ */
+extern struct pmc_mdep *md;
+extern u_int pmc_mincount;
+
+struct pmc *pmc_allocate_pmc_descriptor(void);
+void	pmc_destroy_pmc_descriptor(struct pmc *pm);
+bool	pmc_can_allocate_row(int ri, enum pmc_mode mode);
+struct pmc_classdep *pmc_class_to_classdep(enum pmc_class class);
+struct pmc_classdep *pmc_ri_to_classdep(struct pmc_mdep *md, int ri,
+	    int *adjri);
+void	pmc_wait_for_pmc_idle(struct pmc *pm);
+void	pmc_mark_row_standalone(int ri);
+void	pmc_unmark_row_standalone(int ri);
+void	pmc_ss_owner_link(struct pmc_owner *po);
+void	pmc_ss_owner_unlink(struct pmc_owner *po);
+int	pmc_start(struct pmc *pm);
+int	pmc_stop(struct pmc *pm);
+void	pmc_sampler_deliver(struct pmc *pm, struct pmc_sample *ps);
+
 #endif /* _SYS_PMCKERN_H_ */

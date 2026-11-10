@@ -56,6 +56,10 @@ union pmc_md_op_pmcallocate {
 #define	PMCLOG_EMITADDR		PMCLOG_EMIT64
 
 #ifdef	_KERNEL
+#include <sys/pmc_sample.h>
+
+struct pmc_op_pmcallocate;
+
 union pmc_md_pmc {
 	struct pmc_md_arm64_pmc		pm_arm64;
 	struct pmc_md_cmn600_pmc	pm_cmn600;
@@ -73,6 +77,9 @@ union pmc_md_pmc {
  */
 struct pmc_mdep *pmc_arm64_initialize(void);
 void	pmc_arm64_finalize(struct pmc_mdep *_md);
+int	pmc_md_estimate_cycle_freq(int _cpu, uint64_t *_freq);
+int	pmc_md_resolve_sample_event(enum pmc_sample_event _ev,
+	    struct pmc_op_pmcallocate *_pa);
 
 /* Optional class for CMN-600 controler's PMU. */
 int pmc_cmn600_initialize(struct pmc_mdep *md);

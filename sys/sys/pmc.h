@@ -895,6 +895,10 @@ struct pmc_owner  {
 #define	PMC_PO_OWNS_LOGFILE		0x00000001 /* has a log file */
 #define	PMC_PO_SHUTDOWN			0x00000010 /* in the process of shutdown */
 #define	PMC_PO_INITIAL_MAPPINGS_DONE	0x00000020
+#define	PMC_PO_KERNEL_SAMPLER		0x00000040 /* in-kernel sampler owner */
+#define	PMC_IS_KERNEL_SAMPLER(pm)					\
+	((pm)->pm_owner != NULL &&					\
+	    ((pm)->pm_owner->po_flags & PMC_PO_KERNEL_SAMPLER) != 0)
 
 /*
  * struct pmc_hw -- describe the state of the PMC hardware
@@ -952,7 +956,8 @@ struct pmc_sample {
 	lwpid_t			ps_tid;		/* thread id */
 	pid_t			ps_pid;		/* process PID or -1 */
 	int		ps_ticks; /* ticks at sample time */
-	/* pad */
+	uint16_t	ps_freq_mhz;	/* effective CPU freq at sample time */
+	uint16_t	ps_freq_valid;	/* nonzero if ps_freq_mhz is meaningful */
 	struct thread		*ps_td;		/* which thread */
 	struct pmc		*ps_pmc;	/* interrupting PMC */
 	uintptr_t		*ps_pc;		/* (const) callchain start */
@@ -1266,6 +1271,7 @@ int	pmc_process_interrupt_mp(int _ring, struct pmc *_pm,
     struct trapframe *_tf, struct pmc_multipart *mp);
 int	pmc_process_interrupt(int _ring, struct pmc *_pm,
     struct trapframe *_tf);
+void	pmc_sample_set_freq(int _cpu, uint16_t _freq_mhz, bool _valid);
 int	pmc_save_kernel_callchain(uintptr_t *_cc, int _maxsamples,
     struct trapframe *_tf);
 int	pmc_save_user_callchain(uintptr_t *_cc, int _maxsamples,

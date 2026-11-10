@@ -36,7 +36,10 @@
 #define	_MACHINE_PMC_MDEP_H 1
 
 #ifdef	_KERNEL
+#include <sys/pmc_sample.h>
+
 struct pmc_mdep;
+struct pmc_op_pmcallocate;
 #endif
 
 #include <dev/hwpmc/hwpmc_amd.h>
@@ -137,6 +140,13 @@ struct pmc_mdep *pmc_amd_initialize(void);
 void	pmc_amd_finalize(struct pmc_mdep *_md);
 struct pmc_mdep *pmc_intel_initialize(void);
 void	pmc_intel_finalize(struct pmc_mdep *_md);
+
+int	pmc_amd_resolve_sample_event(enum pmc_sample_event _ev,
+	    struct pmc_op_pmcallocate *_pa);
+int	pmc_intel_resolve_sample_event(enum pmc_sample_event _ev,
+	    struct pmc_op_pmcallocate *_pa);
+int	pmc_md_resolve_sample_event(enum pmc_sample_event _ev,
+	    struct pmc_op_pmcallocate *_pa);
 
 #endif /* _KERNEL */
 #endif /* _MACHINE_PMC_MDEP_H */
