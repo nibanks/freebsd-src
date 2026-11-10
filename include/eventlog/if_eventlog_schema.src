@@ -1,0 +1,291 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 Netflix, Inc.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * Schema for the "if" eventlog provider.
+ *
+ * The if provider streams every observable change to interface state:
+ * synchronous lifecycle / link / config / address events emitted from
+ * the existing ifnet code paths the moment they occur, plus (in a
+ * later stage) periodic per-interface counter samples driven by a
+ * subscriber-gated callout.
+ *
+ * One eventlog_session per VNET; events scope naturally to the
+ * subscriber's view of the network stack.
+ *
+ * Identity discipline: ifindex is the primary key.  The (ifindex,
+ * name) binding is established by IF_ATTACH, mutated by IF_RENAME,
+ * and torn down by IF_DETACH.  Per-event payloads carry only ifindex
+ * and look up the name from a consumer-side table; the kernel
+ * guarantees an ifindex value is reused only after IF_DETACH for it
+ * has been emitted.
+ */
+
+PROVIDER if
+
+KEYWORD META       1
+KEYWORD SAMPLE     2
+KEYWORD LIFECYCLE  3
+KEYWORD LINK       4
+KEYWORD CONFIG     5
+KEYWORD ADDR       6
+KEYWORD SAMPLE_PACKETS 7
+
+ENUM link_state
+    0:UNKNOWN
+    1:DOWN
+    2:UP
+
+ENUM af
+    2:INET
+    28:INET6
+
+/*
+ * Lifecycle events.  These three carry name because they establish,
+ * mutate, or terminate the (ifindex -> name) binding the consumer
+ * uses to label every other event.
+ */
+STRUCT IF_ATTACH
+    ifindex:uint16_t
+    name:char[16]
+    if_type:uint8_t
+    driver:char[16]
+    mtu:uint32_t
+    baudrate:uint64_t
+    hwaddr_len:uint8_t
+    hwaddr:uint8_t[hwaddr_len:32]
+
+STRUCT IF_DETACH
+    ifindex:uint16_t
+    name:char[16]
+
+STRUCT IF_RENAME
+    ifindex:uint16_t
+    old_name:char[16]
+    new_name:char[16]
+
+/*
+ * Link / config / addr events: ifindex only.
+ *
+ * IF_LINK_STATE carries only the new state.  The kernel's link-state
+ * notification path (ifnet_link_event eventhandler) does not expose
+ * the old state to handlers, and the consumer's ifindex-keyed table
+ * already records the previous value from IF_ATTACH or the previous
+ * IF_LINK_STATE.
+ */
+STRUCT IF_LINK_STATE
+    ifindex:uint16_t
+    state:uint8_t:enum_link_state
+    baudrate:uint64_t
+
+STRUCT IF_FLAGS_CHANGE
+    ifindex:uint16_t
+    old_flags:uint32_t:hex
+    new_flags:uint32_t:hex
+
+STRUCT IF_MTU_CHANGE
+    ifindex:uint16_t
+    old_mtu:uint32_t
+    new_mtu:uint32_t
+
+STRUCT IF_CAPABILITIES_CHANGE
+    ifindex:uint16_t
+    old_caps:uint32_t:hex
+    new_caps:uint32_t:hex
+
+/*
+ * Address payload.  addr_len is 4 for AF_INET and 16 for AF_INET6;
+ * addr is a wire-trailing variable-length array carrying exactly
+ * those bytes (no padding for v4).
+ */
+STRUCT IF_ADDR
+    ifindex:uint16_t
+    family:uint16_t:enum_af
+    prefixlen:uint8_t
+    addr_len:uint8_t
+    addr:uint8_t[addr_len:16]
+
+/*
+ * Session-level metadata.  Emitted once per session right after
+ * eventlog_session_create(), and replayed via dump_state.
+ *
+ * period_us is the configured sample period (0 if no sampler is
+ * currently armed -- e.g. if no subscriber matches SAMPLE or
+ * SAMPLE_PACKETS and the gated callout has not started).
+ */
+STRUCT IF_INFO
+    period_us:uint32_t
+    vnet_id:uint64_t
+    nifs:uint16_t
+
+/*
+ * Periodic per-interface counter sample.  ifindex is the primary
+ * key; consumers look up the name from their (ifindex -> name)
+ * table established by IF_ATTACH / IF_RENAME / IF_DETACH events.
+ *
+ * Counters are absolute (cumulative since the interface was
+ * attached, or since the most recent counter reset).  Per-period
+ * deltas are deliberately not produced in the kernel: derivation
+ * is trivial in the consumer, every consumer has different
+ * smoothing preferences anyway, and avoiding kernel-side last-
+ * sample state keeps the sampler stateless and side-effect-free.
+ *
+ * DEPRECATED as of the change that added IF_SAMPLE_BYTES (event 21)
+ * and IF_SAMPLE_PACKETS (event 22), which split bytes/packets by
+ * transport protocol instead of reporting flat totals.  The kernel
+ * no longer emits this event; the struct/event definitions are
+ * retained only so older captures still decode.
+ */
+STRUCT IF_SAMPLE
+    ifindex:uint16_t
+    ibytes:uint64_t
+    obytes:uint64_t
+    ipackets:uint64_t
+    opackets:uint64_t
+    ierrors:uint64_t
+    oerrors:uint64_t
+    iqdrops:uint64_t
+    oqdrops:uint64_t
+    imcasts:uint64_t
+    omcasts:uint64_t
+    noproto:uint64_t
+
+/*
+ * Byte counters: raw L2 totals (unchanged from the deprecated
+ * IF_SAMPLE) plus a transport-protocol split into tcp/udp/other.
+ * other_ibytes/other_obytes count every non-TCP/UDP IP packet
+ * (ICMP, etc), bumped via if_proto_inc_counter() /
+ * if_proto_inc_counter_ip6() at the IP dispatch point, so tcp+udp+other
+ * is self-consistent for that split.
+ *
+ * ibytes/obytes remain the driver/stack L2 totals. They are related to
+ * but not guaranteed to equal tcp+udp+other: non-IP L2 traffic, TSO/LRO
+ * mbuf lengths vs wire bytes, IPv4 reassembly, locally forwarded packets
+ * that never reach ip_output_send(), and multi-port lagg (where L2 sums
+ * member-port driver counters asynchronously) all diverge. Per-tick on
+ * lagg the gap can be large. Consumers wanting protocol composition
+ * should read tcp/udp/other directly and must not derive "other" as
+ * ibytes - tcp_ibytes - udp_ibytes (NCD-10070).
+ */
+STRUCT IF_SAMPLE_BYTES
+    ifindex:uint16_t
+    ibytes:uint64_t
+    obytes:uint64_t
+    tcp_ibytes:uint64_t
+    tcp_obytes:uint64_t
+    udp_ibytes:uint64_t
+    udp_obytes:uint64_t
+    other_ibytes:uint64_t
+    other_obytes:uint64_t
+
+/*
+ * Packet counters: raw L2 totals plus the same tcp/udp/other split
+ * as IF_SAMPLE_BYTES above (see that struct's comment), plus the
+ * error/drop/multicast/noproto counters carried over from IF_SAMPLE
+ * unsplit (these occur at the link/driver level, before a packet
+ * can be classified by L4 protocol).
+ */
+STRUCT IF_SAMPLE_PACKETS
+    ifindex:uint16_t
+    ipackets:uint64_t
+    opackets:uint64_t
+    tcp_ipackets:uint64_t
+    tcp_opackets:uint64_t
+    udp_ipackets:uint64_t
+    udp_opackets:uint64_t
+    ierrors:uint64_t
+    oerrors:uint64_t
+    iqdrops:uint64_t
+    oqdrops:uint64_t
+    imcasts:uint64_t
+    omcasts:uint64_t
+    noproto:uint64_t
+    other_ipackets:uint64_t
+    other_opackets:uint64_t
+
+EVENT IF_INFO                 0  INFO  META       IF_INFO
+    "if provider: period_us=%1 vnet_id=%2 nifs=%3"
+EVENT IF_ATTACH               1  INFO  LIFECYCLE  IF_ATTACH
+    "Interface attached: ifindex=%1 name=%2 type=%3 driver=%4 mtu=%5 baudrate=%6"
+EVENT IF_DETACH               2  INFO  LIFECYCLE  IF_DETACH
+    "Interface detached: ifindex=%1 name=%2"
+EVENT IF_RENAME               3  INFO  LIFECYCLE  IF_RENAME
+    "Interface renamed: ifindex=%1 %2 -> %3"
+EVENT IF_LINK_STATE           4  INFO  LINK       IF_LINK_STATE
+    "Link state change: ifindex=%1 state=%2 baudrate=%3"
+EVENT IF_FLAGS_CHANGE         5  INFO  CONFIG     IF_FLAGS_CHANGE
+    "Flags change: ifindex=%1 %2 -> %3"
+EVENT IF_MTU_CHANGE           6  INFO  CONFIG     IF_MTU_CHANGE
+    "MTU change: ifindex=%1 %2 -> %3"
+EVENT IF_CAPABILITIES_CHANGE  7  INFO  CONFIG     IF_CAPABILITIES_CHANGE
+    "Capabilities change: ifindex=%1 %2 -> %3"
+EVENT IF_ADDR_ADD             8  INFO  ADDR       IF_ADDR
+    "Address added: ifindex=%1 family=%2 prefixlen=%3"
+EVENT IF_ADDR_REMOVE          9  INFO  ADDR       IF_ADDR
+    "Address removed: ifindex=%1 family=%2 prefixlen=%3"
+
+/*
+ * Periodic sampling.
+ *
+ * Emitted by a subscriber-gated callout in if_eventlog.c at
+ * kern.eventlog.if.sample_period_us us (default 500000 = 2 Hz).  The callout is
+ * armed only when at least one subscriber matches SAMPLE or
+ * SAMPLE_PACKETS, so the sampler costs nothing when no consumer is
+ * listening.
+ *
+ * IF_SAMPLE is deprecated and no longer emitted; IF_SAMPLE_BYTES and
+ * IF_SAMPLE_PACKETS take its place (see the deprecation comment on
+ * STRUCT IF_SAMPLE above).
+ */
+EVENT IF_SAMPLE              20  VERBOSE  SAMPLE  IF_SAMPLE
+    "DEPRECATED, no longer emitted: ifindex=%1 in_bytes=%2 out_bytes=%3 in_pkts=%4 out_pkts=%5"
+EVENT IF_SAMPLE_BYTES        21  VERBOSE  SAMPLE  IF_SAMPLE_BYTES
+    "ByteSample: ifindex=%1 in_bytes=%2 out_bytes=%3 tcp_in=%4 tcp_out=%5 udp_in=%6 udp_out=%7 other_in=%8 other_out=%9"
+EVENT IF_SAMPLE_PACKETS      22  VERBOSE  SAMPLE_PACKETS  IF_SAMPLE_PACKETS
+    "PacketSample: ifindex=%1 in_pkts=%2 out_pkts=%3 tcp_in=%4 tcp_out=%5 udp_in=%6 udp_out=%7 other_in=%15 other_out=%16"
+
+/*
+ * Reserved event-ID space.
+ *
+ * The ranges below are deliberately set aside for future
+ * extensions to this schema.  Adding events outside these
+ * reservations is fine; using these IDs for unrelated events
+ * will create a forward-compatibility hazard the day a
+ * subscriber's parser is built against an older copy of this
+ * file than the kernel it's reading from.
+ *
+ * Future stages may add:
+ *   - per-queue sample events (when iflib exposes a portable
+ *     accessor) under the QUEUE keyword,
+ *   - per-driver hardware-counter events under the HWCOUNTER
+ *     keyword,
+ *   - protocol-specific extensions (e.g. lagg / vlan / bridge
+ *     state) if it turns out the right design is to share this
+ *     provider rather than introduce per-protocol providers.
+ *
+ * Reserved ID ranges:
+ *   30 - 39    per-queue / per-driver hwcounter sampling
+ *   40 - 49    protocol-specific (lagg, vlan, bridge) extensions
+ */
