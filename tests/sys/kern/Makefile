@@ -165,6 +165,8 @@ CFLAGS.pdwait+=		-I${SRCTOP}/tests
 CFLAGS.procdesc+=	-I${SRCTOP}/tests
 CFLAGS.ptrace_test+=	-I${SRCTOP}/tests
 
+ATF_TESTS_PYTEST+=	kern_eventlog_test.py
+
 WARNS?=	3
 
 TESTS_SUBDIRS+=	acct

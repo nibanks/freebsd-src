@@ -1,0 +1,121 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 Netflix, Inc.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * This file defines the schema for test event logging.
+ * It is processed by eventlog_gen.awk to generate the event log header
+ * for testing purposes.
+ */
+
+PROVIDER test
+
+KEYWORD BASIC       1
+KEYWORD ADVANCED    2
+KEYWORD COMPLEX     4
+
+ENUM test_status
+    0:INIT
+    1:RUNNING
+    2:SUCCESS
+    3:FAILED
+
+FLAG test_flags
+    0x01:FLAG_A
+    0x02:FLAG_B
+    0x04:FLAG_C
+    0x08:FLAG_D
+
+STRUCT SIMPLE_EVENT
+    value:uint32_t
+STRUCT STATUS_EVENT
+    id:uint64_t
+    status:uint8_t:enum_test_status
+STRUCT FLAGS_EVENT
+    id:uint64_t
+    flags:uint32_t:flag_test_flags
+STRUCT COMPLEX_EVENT
+    id:uint64_t
+    value:uint32_t
+    status:uint8_t:enum_test_status
+    flags:uint32_t:flag_test_flags
+    counter:int32_t
+STRUCT VARLEN_EVENT
+    id:uint64_t
+    count:uint8_t
+    values:uint64_t[count:8]
+
+# Stress-test inter-field __packed accesses: every fixed-width primitive
+# sits at an offset that is unaligned for its type.
+STRUCT MISALIGNED_EVENT
+    flag1:uint8_t
+    big1:uint64_t
+    flag2:uint8_t
+    mid1:uint32_t
+    flag3:uint8_t
+    small1:uint16_t
+    flag4:uint8_t
+    sbig:int64_t
+    smid:int32_t
+    sentinel:uint8_t
+
+# VARLEN with uint32_t element type whose head ends at offset 10
+# (sizeof(head) % _Alignof(uint32_t) == 2).
+STRUCT VARLEN_U32_EVENT
+    id:uint64_t
+    flag:uint8_t
+    cnt:uint8_t
+    values:uint32_t[cnt:6]
+
+# VARLEN with uint16_t element type whose head ends at offset 5
+# (sizeof(head) % _Alignof(uint16_t) == 1).
+STRUCT VARLEN_U16_EVENT
+    id:uint32_t
+    cnt:uint8_t
+    values:uint16_t[cnt:4]
+
+# VARLEN with uint8_t element type: alignment is always 1, trivial baseline.
+STRUCT VARLEN_U8_EVENT
+    id:uint32_t
+    cnt:uint8_t
+    values:uint8_t[cnt:7]
+
+EVENT SIMPLE_EVENT  0  INFO  BASIC  SIMPLE_EVENT
+    "Simple event: value=%u"
+EVENT STATUS_EVENT  1  INFO  BASIC  STATUS_EVENT
+    "[%lu] Status event: status=%s"
+EVENT FLAGS_EVENT  2  VERBOSE  ADVANCED  FLAGS_EVENT
+    "[%lu] Flags event: flags=%s"
+EVENT COMPLEX_EVENT  3  WARN  COMPLEX  COMPLEX_EVENT
+    "[%lu] Complex event: value=%u status=%s flags=%s counter=%d"
+EVENT VARLEN_EVENT  4  INFO  BASIC  VARLEN_EVENT
+    "[%1] Varlen event: count=%2"
+EVENT MISALIGNED_EVENT  5  INFO  BASIC  MISALIGNED_EVENT
+    "Misaligned event: big1=%2 mid1=%4 sbig=%8 sentinel=%10"
+EVENT VARLEN_U32_EVENT  6  INFO  BASIC  VARLEN_U32_EVENT
+    "[%1] Varlen32 event: cnt=%3"
+EVENT VARLEN_U16_EVENT  7  INFO  BASIC  VARLEN_U16_EVENT
+    "[%1] Varlen16 event: cnt=%2"
+EVENT VARLEN_U8_EVENT  8  INFO  BASIC  VARLEN_U8_EVENT
+    "[%1] Varlen8 event: cnt=%2"
