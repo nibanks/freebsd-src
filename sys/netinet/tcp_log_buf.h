@@ -573,6 +573,7 @@ int tcp_log_apply_ratio(struct tcpcb *tp, int ratio);
 #ifdef DDB
 void db_print_bblog_entries(struct tcp_log_stailq *log_entries, int indent);
 #endif
+const char *tcp_log_id_str(struct tcpcb *tp);
 #else /* !TCP_BLACKBOX */
 #define tcp_log_verbose	(false)
 
@@ -584,6 +585,11 @@ tcp_log_event(struct tcpcb *tp, struct tcphdr *th, struct sockbuf *rxbuf,
     const struct timeval *tv)
 {
 
+	return (NULL);
+}
+static inline const char *
+tcp_log_id_str(struct tcpcb *tp __unused)
+{
 	return (NULL);
 }
 #endif /* TCP_BLACKBOX */

@@ -355,6 +355,13 @@ tcp_log_id_cmp(struct tcp_log_id_bucket *a, struct tcp_log_id_bucket *b)
 
 RB_GENERATE_STATIC(tcp_log_id_tree, tcp_log_id_bucket, tlb_rb, tcp_log_id_cmp)
 
+const char *
+tcp_log_id_str(struct tcpcb *tp)
+{
+
+	return (tp->t_lib != NULL) ? tp->t_lib->tlb_id : NULL;
+}
+
 static __inline void
 tcp_log_id_validate_tree_lock(int tree_locked)
 {
