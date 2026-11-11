@@ -1,0 +1,34 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 Netflix, Inc.
+ *
+ * Schema for the virtual "machine" eventlog provider. Events are
+ * synthesised by elog(1) at capture start and re-emitted into every
+ * rolled or per-session output file; there is no kernel producer.
+ */
+
+PROVIDER machine
+
+KEYWORD META 1
+
+STRUCT MACHINE_INFO
+    hostuuid:char[37]
+    hostname:char[64]
+    osrelease:char[32]
+    kernel_version:char[256]
+    firmware_version:char[128]
+    platform:char[64]
+    cpu_model:char[128]
+    ncpu:uint32_t
+    physmem:uint64_t
+    boottime_sec:int64_t
+
+STRUCT METADATA_KV
+    key:char[64]
+    value:char[256]
+
+EVENT MachineInfo 1 INFO META MACHINE_INFO
+    "host=%2 uuid=%1 release=%3 kernel=%4 firmware=%5 platform=%6 cpu=%7 ncpu=%8 physmem=%9 boot=%10"
+EVENT MetadataKV  2 INFO META METADATA_KV
+    "%1=%2"

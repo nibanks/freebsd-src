@@ -107,6 +107,8 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <eventlog/tcp_eventlog.h>
+#include <netinet/tcp_hpts.h>
 #include <netinet6/tcp6_var.h>
 #include <netinet/tcpip.h>
 #include <netinet/cc/cc.h>
@@ -1502,8 +1504,23 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 	KASSERT(tp->t_state != TCPS_TIME_WAIT, ("%s: TCPS_TIME_WAIT",
 	    __func__));
 
+	tiwin = th->th_win << tp->snd_scale;
+
 	TCP_LOG_EVENT(tp, th, &so->so_rcv, &so->so_snd, TCP_LOG_IN, 0,
 	    tlen, NULL, true);
+	TCP_EVENTLOG_IN_LOG(tp->t_eventlog_session,
+	    th->th_seq,
+	    th->th_ack,
+	    thflags,
+	    th->th_win,
+	    tiwin,
+	    tlen,
+	    tp->t_state,
+	    th->th_off,
+	    th->th_urp,
+	    tcp_get_u64_usecs(NULL),
+	    (uint8_t)((th->th_off << 2) - sizeof(struct tcphdr)),
+	    (const uint8_t *)(th + 1));
 
 	if ((thflags & TH_SYN) && (thflags & TH_FIN) && V_drop_synfin) {
 		if ((s = tcp_log_addrs(inc, th, NULL, NULL))) {
@@ -1543,7 +1560,6 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 	 * Scale up the window into a 32-bit value.
 	 * For the SYN_SENT state the scale is zero.
 	 */
-	tiwin = th->th_win << tp->snd_scale;
 #ifdef STATS
 	stats_voi_update_abs_ulong(tp->t_stats, VOI_TCP_FRWIN, tiwin);
 #endif
@@ -1794,7 +1810,19 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 				 * typically means increasing the congestion
 				 * window.
 				 */
+				{
+				uint32_t cwnd_before = tp->snd_cwnd;
 				cc_ack_received(tp, th, nsegs, CC_ACK);
+				TCP_EVENTLOG_ACK_LOG(tp->t_eventlog_session,
+				    acked, th->th_ack,
+				    tp->snd_max - th->th_ack,
+				    0, nsegs,
+				    tcp_get_u64_usecs(NULL));
+				if (tp->snd_cwnd != cwnd_before)
+					TCP_EVENTLOG_CWND_LOG(
+					    tp->t_eventlog_session,
+					    tp->snd_cwnd, tp->snd_ssthresh);
+				}
 
 				tp->snd_una = th->th_ack;
 				/*
@@ -1855,14 +1883,16 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 				tcp_clean_sackreport(tp);
 			TCPSTAT_INC(tcps_preddat);
 			tp->rcv_nxt += tlen;
-			if (tlen &&
-			    ((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
-			    (tp->t_fbyte_in == 0)) {
-				tp->t_fbyte_in = ticks;
-				if (tp->t_fbyte_in == 0)
-					tp->t_fbyte_in = 1;
-				if (tp->t_fbyte_out && tp->t_fbyte_in)
-					tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+			if (tlen) {
+				if (((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
+				    (tp->t_fbyte_in == 0)) {
+					tp->t_fbyte_in = ticks;
+					if (tp->t_fbyte_in == 0)
+						tp->t_fbyte_in = 1;
+					if (tp->t_fbyte_out && tp->t_fbyte_in)
+						tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+				}
+				tcp_request_stamp_first_rcv(tp);
 			}
 			/*
 			 * Pull snd_wl1 up to prevent seq wrap relative to
@@ -2015,6 +2045,8 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
 				tp->t_flags |= TF_ACKNOW;
 
 			tcp_ecn_input_syn_sent(tp, thflags, iptos);
+
+			tcp_eventlog_conn_params(tp);
 
 			/*
 			 * Received <SYN,ACK> in SYN_SENT[*] state.
@@ -2635,6 +2667,9 @@ enter_recovery:
 				}
 				/* Congestion signal before ack. */
 				cc_cong_signal(tp, th, CC_NDUPACK);
+				TCP_EVENTLOG_ENTER_RECOVERY_LOG(
+				    tp->t_eventlog_session,
+				    tp->snd_cwnd, tp->snd_ssthresh);
 				cc_ack_received(tp, th, nsegs, CC_DUPACK);
 				tcp_timer_activate(tp, TT_REXMT, 0);
 				tp->t_rtttime = 0;
@@ -2941,7 +2976,18 @@ process_ACK:
 		 * control related information. This typically means increasing
 		 * the congestion window.
 		 */
+		{
+		uint32_t cwnd_before = tp->snd_cwnd;
 		cc_ack_received(tp, th, nsegs, CC_ACK);
+		TCP_EVENTLOG_ACK_LOG(tp->t_eventlog_session,
+		    acked, th->th_ack,
+		    tp->snd_max - th->th_ack,
+		    0, nsegs,
+		    tcp_get_u64_usecs(NULL));
+		if (tp->snd_cwnd != cwnd_before)
+			TCP_EVENTLOG_CWND_LOG(tp->t_eventlog_session,
+			    tp->snd_cwnd, tp->snd_ssthresh);
+		}
 
 		if (acked > sbavail(&so->so_snd)) {
 			if (tp->snd_wnd >= sbavail(&so->so_snd))
@@ -2971,6 +3017,9 @@ process_ACK:
 		if (IN_RECOVERY(tp->t_flags) &&
 		    SEQ_GEQ(th->th_ack, tp->snd_recover)) {
 			cc_post_recovery(tp, th);
+			TCP_EVENTLOG_EXIT_RECOVERY_LOG(
+			    tp->t_eventlog_session,
+			    tp->snd_cwnd, tp->snd_ssthresh);
 		}
 		if (SEQ_GT(tp->snd_una, tp->snd_recover)) {
 			tp->snd_recover = tp->snd_una;
@@ -3158,14 +3207,16 @@ dodata:							/* XXX */
 			else
 				tp->t_flags |= TF_ACKNOW;
 			tp->rcv_nxt += tlen;
-			if (tlen &&
-			    ((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
-			    (tp->t_fbyte_in == 0)) {
-				tp->t_fbyte_in = ticks;
-				if (tp->t_fbyte_in == 0)
-					tp->t_fbyte_in = 1;
-				if (tp->t_fbyte_out && tp->t_fbyte_in)
-					tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+			if (tlen) {
+				if (((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
+				    (tp->t_fbyte_in == 0)) {
+					tp->t_fbyte_in = ticks;
+					if (tp->t_fbyte_in == 0)
+						tp->t_fbyte_in = 1;
+					if (tp->t_fbyte_out && tp->t_fbyte_in)
+						tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+				}
+				tcp_request_stamp_first_rcv(tp);
 			}
 			thflags = tcp_get_flags(th) & TH_FIN;
 			TCPSTAT_INC(tcps_rcvpack);
@@ -3604,6 +3655,13 @@ tcp_xmit_timer(struct tcpcb *tp, int rtt)
 	TCPSTAT_INC(tcps_rttupdated);
 	if (tp->t_rttupdated < UCHAR_MAX)
 		tp->t_rttupdated++;
+
+	TCP_EVENTLOG_RTT_LOG(tp->t_eventlog_session,
+	    rtt * 1000,
+	    (tp->t_srtt >> TCP_RTT_SHIFT) * 1000,
+	    0,
+	    tp->t_rttlow,
+	    0, 0);
 #ifdef STATS
 	stats_voi_update_abs_u32(tp->t_stats, VOI_TCP_RTT,
 	    imax(0, rtt * 1000 / hz));
@@ -3838,6 +3896,7 @@ tcp_mss_update(struct tcpcb *tp, int offer, int mtuoffer,
 	mss = max(mss, 64);
 
 	tp->t_maxseg = mss;
+	TCP_EVENTLOG_MSS_LOG(tp->t_eventlog_session, tp->t_maxseg);
 	if (tp->t_maxseg < V_tcp_mssdflt) {
 		/*
 		 * The MSS is so small we should not process incoming
@@ -3897,6 +3956,7 @@ tcp_mss(struct tcpcb *tp, int offer)
 	 * XXXGL: shouldn't we reserve space for IP/IPv6 options?
 	 */
 	tp->t_maxseg = max(mss, 64);
+	TCP_EVENTLOG_MSS_LOG(tp->t_eventlog_session, tp->t_maxseg);
 	if (tp->t_maxseg < V_tcp_mssdflt) {
 		/*
 		 * The MSS is so small we should not process incoming

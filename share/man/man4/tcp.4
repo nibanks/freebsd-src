@@ -145,6 +145,41 @@ connection.
 See
 .Xr mod_cc 4
 for details.
+.It Dv TCP_EVENTLOG
+Enable or disable per-connection event logging via the kernel eventlog framework.
+This option accepts a single integer argument: a non-zero value enables event
+logging for the connection, and zero disables it.
+.Pp
+When enabled, the TCP stack emits structured events for the connection
+.Pq e.g., segment transmission and reception, RTT samples, congestion window changes, retransmissions
+that can be captured by the
+.Xr elog 1
+user-space tool.
+Enabling eventlog on a connection also triggers an immediate dump of the
+current connection state, so that a subscriber sees the full context even if
+it attached after the connection was established.
+.Pp
+The system-wide default for new connections is controlled by the
+.Va kern.eventlog.tcp.default
+sysctl.
+See the
+.Sx MIB (sysctl) Variables
+section for details.
+.It Dv TCP_EVENTLOG_INFO
+Return the per-connection EventLog session identifier and enablement state.
+It accepts a single argument: a pointer to an instance of
+.Vt "struct tcp_eventlog_info" .
+The
+.Va session_id
+member is the connection's
+.Va inp_gencnt ,
+which TCP uses as the EventLog session ID and stamps into TCP EventLog event
+headers.
+The
+.Va enabled
+member is non-zero when event logging is enabled for the connection, matching
+.Dv TCP_EVENTLOG .
+The option is read-only.
 .It Dv TCP_FASTOPEN
 Enable or disable TCP Fast Open (TFO).
 To use this option, the kernel must be built with the
@@ -1096,6 +1131,7 @@ when trying to change TCP function blocks at an invalid point in the session;
 when trying to use a TCP function block that is not available;
 .El
 .Sh SEE ALSO
+.Xr elog 1 ,
 .Xr getsockopt 2 ,
 .Xr setfib 2 ,
 .Xr socket 2 ,
@@ -1114,6 +1150,7 @@ when trying to use a TCP function block that is not available;
 .Xr tcp_rack 4 ,
 .Xr setkey 8 ,
 .Xr sysctl 8 ,
+.Xr eventlog 9 ,
 .Xr tcp_functions 9
 .Rs
 .%A "V. Jacobson"

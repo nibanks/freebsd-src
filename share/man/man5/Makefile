@@ -9,6 +9,7 @@ MAN=	a.out.5 \
 	dir.5 \
 	disktab.5 \
 	elf.5 \
+	elog.5 \
 	ethers.5 \
 	eui64.5 \
 	fbtab.5 \

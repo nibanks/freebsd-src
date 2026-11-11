@@ -69,6 +69,8 @@
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
 #include <netinet/tcp_hpts.h>
+#include <sys/eventlog.h>
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/cc/cc.h>
 #include <netinet/cc/cc_cubic.h>
 #include <netinet/cc/cc_module.h>
@@ -123,9 +125,11 @@ cubic_log_hystart_event(struct cc_var *ccv, struct cubic *cubicd, uint8_t mod, u
 	 */
 	struct tcpcb *tp;
 
+	tp = ccv->tp;
+	TCP_EVENTLOG_HYSTART_LOG(tp->t_eventlog_session,
+	    cubicd->css_current_round, 0, tp->snd_max, mod);
 	if (hystart_bblogs == 0)
 		return;
-	tp = ccv->tp;
 	if (tcp_bblogging_on(tp)) {
 		union tcp_log_stackspecific log;
 		struct timeval tv;

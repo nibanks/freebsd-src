@@ -27,6 +27,8 @@
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
@@ -108,10 +110,70 @@ ATF_TC_BODY(getsockname_disconnected, tc)
 	close(s);
 }
 
+ATF_TC_WITHOUT_HEAD(tcp_eventlog_info);
+ATF_TC_BODY(tcp_eventlog_info, tc)
+{
+	struct sockaddr_in sin = {
+		.sin_family = AF_INET,
+		.sin_len = sizeof(sin),
+	};
+	struct tcp_eventlog_info client, server;
+	int enable;
+	socklen_t len;
+	int s, c, a;
+
+	ATF_REQUIRE((s = socket(PF_INET, SOCK_STREAM, 0)) >= 0);
+	ATF_REQUIRE((c = socket(PF_INET, SOCK_STREAM, 0)) >= 0);
+
+	ATF_REQUIRE(bind(s, (struct sockaddr *)&sin, sizeof(sin)) == 0);
+	len = sizeof(sin);
+	ATF_REQUIRE(getsockname(s, (struct sockaddr *)&sin, &len) == 0);
+	sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	ATF_REQUIRE(listen(s, -1) == 0);
+	ATF_REQUIRE(connect(c, (struct sockaddr *)&sin, sizeof(sin)) == 0);
+	ATF_REQUIRE((a = accept(s, NULL, NULL)) >= 0);
+
+	len = sizeof(client);
+	ATF_REQUIRE(getsockopt(c, IPPROTO_TCP, TCP_EVENTLOG_INFO,
+	    &client, &len) == 0);
+	ATF_REQUIRE(len == sizeof(client));
+	ATF_REQUIRE(client.session_id != 0);
+	ATF_REQUIRE(client.enabled == 0);
+
+	len = sizeof(server);
+	ATF_REQUIRE(getsockopt(a, IPPROTO_TCP, TCP_EVENTLOG_INFO,
+	    &server, &len) == 0);
+	ATF_REQUIRE(len == sizeof(server));
+	ATF_REQUIRE(server.session_id != 0);
+	ATF_REQUIRE(server.enabled == 0);
+	ATF_REQUIRE(client.session_id != server.session_id);
+
+	enable = 1;
+	ATF_REQUIRE(setsockopt(c, IPPROTO_TCP, TCP_EVENTLOG, &enable,
+	    sizeof(enable)) == 0);
+	len = sizeof(client);
+	ATF_REQUIRE(getsockopt(c, IPPROTO_TCP, TCP_EVENTLOG_INFO,
+	    &client, &len) == 0);
+	ATF_REQUIRE(client.enabled != 0);
+
+	enable = 0;
+	ATF_REQUIRE(setsockopt(c, IPPROTO_TCP, TCP_EVENTLOG, &enable,
+	    sizeof(enable)) == 0);
+	len = sizeof(client);
+	ATF_REQUIRE(getsockopt(c, IPPROTO_TCP, TCP_EVENTLOG_INFO,
+	    &client, &len) == 0);
+	ATF_REQUIRE(client.enabled == 0);
+
+	close(a);
+	close(c);
+	close(s);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 	ATF_TP_ADD_TC(tp, implied_connect);
 	ATF_TP_ADD_TC(tp, getsockname_disconnected);
+	ATF_TP_ADD_TC(tp, tcp_eventlog_info);
 
 	return (atf_no_error());
 }

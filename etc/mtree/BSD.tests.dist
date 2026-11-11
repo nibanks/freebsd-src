@@ -427,6 +427,8 @@
         ..
         libdiff
         ..
+        libeventlog
+        ..
         libexecinfo
         ..
         libkvm

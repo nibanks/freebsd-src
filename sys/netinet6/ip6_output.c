@@ -100,6 +100,7 @@
 #include <netinet/in.h>
 #include <netinet/in_var.h>
 #include <netinet/ip_var.h>
+#include <net/if_proto.h>
 #include <netinet6/in6_fib.h>
 #include <netinet6/in6_var.h>
 #include <netinet/ip6.h>
@@ -305,7 +306,8 @@ ip6_output_send(struct inpcb *inp, struct ifnet *ifp, struct ifnet *origifp,
 	struct ktls_session *tls = NULL;
 #endif
 	struct m_snd_tag *mst;
-	int error;
+	int error, pktlen;
+	uint8_t proto;
 
 	MPASS((m->m_pkthdr.csum_flags & CSUM_SND_TAG) == 0);
 	mst = NULL;
@@ -362,7 +364,19 @@ ip6_output_send(struct inpcb *inp, struct ifnet *ifp, struct ifnet *origifp,
 		m->m_pkthdr.csum_flags |= CSUM_SND_TAG;
 	}
 
+	/*
+	 * Captured before nd6_output_ifp(), which may free m even on
+	 * success; only counted after, so a silently dropped packet
+	 * doesn't inflate tcp/udp/other relative to obytes. ip6_nxt reads
+	 * IPPROTO_FRAGMENT (not the original TCP/UDP) once fragmented,
+	 * undercounting into "other" -- rare enough (PMTU/MSS clamping
+	 * avoids fragmenting TCP) to not walk the extension headers here.
+	 */
+	proto = mtod(m, struct ip6_hdr *)->ip6_nxt;
+	pktlen = m->m_pkthdr.len;
 	error = nd6_output_ifp(ifp, origifp, m, dst, (struct route *)ro);
+	if (error == 0)
+		if_proto_inc_counter(ifp, proto, false, pktlen);
 
 done:
 	/* Check for route change invalidating send tags. */

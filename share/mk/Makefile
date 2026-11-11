@@ -28,6 +28,7 @@ FILES=	\
 	bsd.doc.mk \
 	bsd.dtb.mk \
 	bsd.endian.mk \
+	bsd.eventlog.mk \
 	bsd.files.mk \
 	bsd.incs.mk \
 	bsd.info.mk \

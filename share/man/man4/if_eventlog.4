@@ -1,0 +1,234 @@
+.\"-
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 Netflix, Inc.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd November 5, 2026
+.Dt IF_EVENTLOG 4
+.Os
+.Sh NAME
+.Nm if_eventlog
+.Nd network interface eventlog provider
+.Sh DESCRIPTION
+.Nm
+is the kernel-side producer for the
+.Dq if
+.Xr eventlog 9
+provider.
+It streams every observable change to network interface state
+\(em attach, detach, rename, link state, configuration changes,
+and address add/remove
+\(em as schema-driven binary records, plus optional periodic
+per-interface counter samples, split by transport protocol.
+.Pp
+A single eventlog session is created per virtual network stack
+.Xr ( vimage 9 ) ;
+events scope naturally to the subscriber's view of the network
+stack.
+The provider's per-event keyword filters let consumers subscribe
+selectively, for example
+.Dq SAMPLE only
+to receive only the periodic counter samples without the
+configuration noise.
+.Sh KEYWORDS
+The provider exposes the following keywords for subscription
+filtering.
+.Bl -tag -width "SAMPLE_PACKETS"
+.It META
+Session-level metadata
+.Pq Vt IF_INFO .
+.It SAMPLE
+Periodic per-interface byte samples
+.Pq Vt IF_SAMPLE_BYTES .
+.It SAMPLE_PACKETS
+Periodic per-interface packet samples
+.Pq Vt IF_SAMPLE_PACKETS .
+.It LIFECYCLE
+Interface attach, detach, and rename
+.Pq Vt IF_ATTACH , Vt IF_DETACH , Vt IF_RENAME .
+.It LINK
+Link-state transitions
+.Pq Vt IF_LINK_STATE .
+.It CONFIG
+Administrative flag, MTU, and capability changes
+.Pq Vt IF_FLAGS_CHANGE , Vt IF_MTU_CHANGE , Vt IF_CAPABILITIES_CHANGE .
+.It ADDR
+Interface address add and remove
+.Pq Vt IF_ADDR_ADD , Vt IF_ADDR_REMOVE .
+.El
+.Sh EVENTS
+.Bl -tag -width "IF_CAPABILITIES_CHANGE"
+.It IF_INFO
+Session-level metadata: the configured sample period in
+microseconds (zero if no sampler is currently armed), the VNET
+identifier, and the count of attached ifnets at session-create
+time.
+Emitted once per session and replayed via
+.Fn dump_state .
+.It IF_ATTACH
+An ifnet has just been added to the global table.
+Carries the interface index, name, link-layer type
+.Pq Dv IFT_* ,
+driver name, MTU, baud rate, and the link-layer hardware
+address.
+This is the only point at which the
+.Pq ifindex No \(-> Em name
+binding consumers maintain is established for that ifindex.
+.Pp
+The live event fires from within
+.Xr if_attach 9 ,
+before the driver writes the hardware address, so
+.Va hwaddr
+may be empty for a freshly attached interface; the authoritative
+value arrives with the
+.Fn dump_state
+replay a subscriber receives on attach and, on any later link-layer
+address change
+.Pq Xr if_setlladdr 9 ,
+a re-emitted
+.Vt IF_ATTACH .
+Interfaces with no link-layer address, such as
+.Xr lo 4 ,
+report an empty
+.Va hwaddr
+by design.
+.It IF_DETACH
+An ifnet has been removed from the global table.
+After this event the kernel may reuse the ifindex for a future
+.Vt IF_ATTACH .
+.It IF_RENAME
+An ifnet's user-visible name has changed; the ifindex is
+unchanged.
+Consumers update their
+.Pq ifindex No \(-> Em name
+table on this event.
+.It IF_LINK_STATE
+The interface's link state has transitioned.
+The new state is one of
+.Dv UNKNOWN ,
+.Dv DOWN ,
+or
+.Dv UP ;
+the previous state can be inferred from the consumer's running
+table or from the most recent
+.Vt IF_LINK_STATE
+or
+.Vt IF_ATTACH
+event.
+.It IF_FLAGS_CHANGE , IF_MTU_CHANGE , IF_CAPABILITIES_CHANGE
+A
+.Dv SIOCSIFFLAGS ,
+.Dv SIOCSIFMTU ,
+or
+.Dv SIOCSIFCAP /
+.Dv SIOCSIFCAPNV
+operation has just completed.
+Both the old and new values are reported.
+.It IF_ADDR_ADD , IF_ADDR_REMOVE
+A network-layer address has been added to or removed from an
+interface.
+.It IF_SAMPLE
+.Sy Deprecated ;
+no longer emitted.
+Superseded by
+.Vt IF_SAMPLE_BYTES
+and
+.Vt IF_SAMPLE_PACKETS ,
+which split bytes and packets by transport protocol instead of
+reporting flat totals.
+The struct and event definitions are retained only so older
+captures still decode.
+.It IF_SAMPLE_BYTES , IF_SAMPLE_PACKETS
+Periodic per-interface counter samples emitted with period
+.Va kern.eventlog.if.sample_period_us
+microseconds when at least one subscriber is attached.
+.Vt IF_SAMPLE_BYTES
+carries in/out byte totals plus a TCP/UDP/other split of each and is
+selected by the
+.Sy SAMPLE
+keyword;
+.Vt IF_SAMPLE_PACKETS
+carries in/out packet totals plus the same split, along with the
+errors/drops/multicast/noproto counters carried over from the
+deprecated
+.Vt IF_SAMPLE ,
+and is selected by
+.Sy SAMPLE_PACKETS .
+The
+.Sy other
+counters cover every non-TCP/UDP IP packet
+.Pq e.g. ICMP ,
+classified at the same IP-dispatch site as the TCP/UDP counters, so
+tcp+udp+other is internally consistent for that split.
+The L2 in/out totals in the same sample are driver/stack counters and
+are not guaranteed to equal tcp+udp+other: non-IP L2 traffic, TSO/LRO,
+IPv4 reassembly, locally forwarded traffic, and multi-port
+.Pq Xr lagg 4
+interfaces (where L2 sums member-port driver counters asynchronously,
+and protocol counts accrue on the aggregate ifp) all diverge.
+On lagg member ports the protocol split is usually near zero while L2
+totals reflect wire traffic.
+Do not derive
+.Sy other
+as total minus tcp minus udp.
+The sampler is gated by the
+.Sy subscribers_changed
+callback and costs nothing while no consumer is listening.
+.El
+.Sh SYSCTLS
+The provider's per-keyword filtering and default state are
+exposed as standard
+.Xr eventlog 9
+sysctls under
+.Va kern.eventlog.if .
+The
+.Nm
+producer adds one provider-specific tunable:
+.Bl -tag -width "kern.eventlog.if.sample_period_us"
+.It Va kern.eventlog.if.sample_period_us
+Period between
+.Vt IF_SAMPLE_BYTES
+and
+.Vt IF_SAMPLE_PACKETS
+emissions, in microseconds, in the range
+.Bq Em 1000 , 1800000000
+(1 ms to 30 min).
+Default
+.Em 500000
+(2 Hz).
+The sampler is armed only while the provider has subscribers,
+so changing this knob has no effect when no consumer is
+attached.
+.El
+.Sh SEE ALSO
+.Xr ifconfig 8 ,
+.Xr ifnet 9 ,
+.Xr eventlog 9 ,
+.Xr vimage 9 ,
+.Xr elog 1
+.Sh HISTORY
+The
+.Nm
+provider first appeared in
+.Fx 15.0 .

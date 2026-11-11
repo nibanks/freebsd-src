@@ -88,6 +88,14 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_log_buf.h>
+#include <sys/eventlog.h>
+/*
+ * Compile our own copy of the tcp decode blob: this module may be built out of
+ * band and loaded on a kernel with a different tcp schema, so the schema_id we
+ * register must describe the events this module emits, not the kernel's.
+ */
+#define	TCP_EVENTLOG_DEFINE_DECODE_BLOB
+#include <eventlog/tcp_eventlog.h>
 #include <netinet/tcp_syncache.h>
 #include <netinet/tcp_hpts.h>
 #include <netinet/tcp_ratelimit.h>
@@ -433,7 +441,8 @@ rack_process_data(struct mbuf *m, struct tcphdr *th,
     uint32_t tiwin, int32_t thflags, int32_t nxt_pkt);
 static void
 rack_ack_received(struct tcpcb *tp, struct tcp_rack *rack,
-   uint32_t th_ack, uint16_t nsegs, uint16_t type, int32_t recovery);
+   uint32_t th_ack, uint16_t nsegs, uint16_t type, int32_t recovery,
+   int32_t num_sack_blks, struct sackblk *sack_blocks);
 static struct rack_sendmap *rack_alloc(struct tcp_rack *rack);
 static struct rack_sendmap *rack_alloc_limit(struct tcp_rack *rack,
     uint8_t limit_type);
@@ -488,7 +497,8 @@ static void rack_init_sysctls(void);
 static void
 rack_log_ack(struct tcpcb *tp, struct tcpopt *to,
     struct tcphdr *th, int entered_rec, int dup_ack_struck,
-    int *dsack_seen, int *sacks_seen);
+    int *dsack_seen, int *sacks_seen,
+    int32_t *out_num_sack_blks, struct sackblk *out_sack_blocks);
 static void
 rack_log_output(struct tcpcb *tp, struct tcpopt *to, int32_t len,
     uint32_t seq_out, uint16_t th_flags, int32_t err, uint64_t ts,
@@ -2852,6 +2862,8 @@ rack_log_rtt_sample(struct tcp_rack *rack, uint32_t rtt)
 static void
 rack_log_rtt_sample_calc(struct tcp_rack *rack, uint32_t rtt, uint32_t send_time, uint32_t ack_time, int where)
 {
+	TCP_EVENTLOG_RTT_SAMPLE_LOG(rack->rc_tp->t_eventlog_session, rtt);
+
 	if (rack_verbose_logging && tcp_bblogging_on(rack->rc_tp)) {
 		union tcp_log_stackspecific log;
 		struct timeval tv;
@@ -5345,7 +5357,7 @@ skip_measurement:
  */
 static void
 rack_ack_received(struct tcpcb *tp, struct tcp_rack *rack, uint32_t th_ack, uint16_t nsegs,
-    uint16_t type, int32_t post_recovery)
+    uint16_t type, int32_t post_recovery, int32_t num_sack_blks, struct sackblk *sack_blocks)
 {
 	uint32_t prior_cwnd, acked;
 	struct tcp_log_buffer *lgb = NULL;
@@ -5438,6 +5450,31 @@ rack_ack_received(struct tcpcb *tp, struct tcp_rack *rack, uint32_t th_ack, uint
 		tp->t_ccv.flags |= CCF_USE_LOCAL_ABC;
 		CC_ALGO(tp)->ack_received(&tp->t_ccv, type);
 	}
+	if (tp->snd_cwnd != prior_cwnd)
+		TCP_EVENTLOG_CWND_LOG(tp->t_eventlog_session,
+		    tp->snd_cwnd, tp->snd_ssthresh);
+	if (num_sack_blks > 0 && sack_blocks != NULL) {
+		TCP_EVENTLOG_SACK_LOG(tp->t_eventlog_session,
+		    acked, th_ack,
+		    ctf_flight_size(rack->rc_tp, rack->r_ctl.rc_sacked),
+		    rack->r_ctl.rc_sacked, nsegs,
+		    tcp_tv_to_lusec(&rack->r_ctl.act_rcv_time),
+		    num_sack_blks,
+		    num_sack_blks > 0 ? sack_blocks[0].start : 0,
+		    num_sack_blks > 0 ? sack_blocks[0].end : 0,
+		    num_sack_blks > 1 ? sack_blocks[1].start : 0,
+		    num_sack_blks > 1 ? sack_blocks[1].end : 0,
+		    num_sack_blks > 2 ? sack_blocks[2].start : 0,
+		    num_sack_blks > 2 ? sack_blocks[2].end : 0,
+		    num_sack_blks > 3 ? sack_blocks[3].start : 0,
+		    num_sack_blks > 3 ? sack_blocks[3].end : 0);
+	} else {
+		TCP_EVENTLOG_ACK_LOG(tp->t_eventlog_session,
+		    acked, th_ack,
+		    ctf_flight_size(rack->rc_tp, rack->r_ctl.rc_sacked),
+		    rack->r_ctl.rc_sacked, nsegs,
+		    tcp_tv_to_lusec(&rack->r_ctl.act_rcv_time));
+	}
 	if (lgb) {
 		lgb->tlb_stackinfo.u_bbr.flex6 = tp->snd_cwnd;
 	}
@@ -5501,9 +5538,8 @@ tcp_rack_partialack(struct tcpcb *tp)
 static void
 rack_exit_recovery(struct tcpcb *tp, struct tcp_rack *rack, int how)
 {
-	/*
-	 * Now exit recovery.
-	 */
+	TCP_EVENTLOG_EXIT_RECOVERY_LOG(tp->t_eventlog_session,
+	    tp->snd_cwnd, tp->snd_ssthresh);
 	EXIT_RECOVERY(tp->t_flags);
 }
 
@@ -5708,6 +5744,8 @@ rack_cong_signal(struct tcpcb *tp, uint32_t type, uint32_t ack, int line)
 		CC_ALGO(tp)->cong_signal(&tp->t_ccv, type);
 	}
 	if ((in_rec_at_entry == 0) && IN_RECOVERY(tp->t_flags)) {
+		TCP_EVENTLOG_ENTER_RECOVERY_LOG(tp->t_eventlog_session,
+		    tp->snd_cwnd, tp->snd_ssthresh);
 		rack_log_to_prr(rack, 15, cwnd_enter, line);
 		rack->r_ctl.dsack_byte_cnt = 0;
 		rack->r_ctl.retran_during_recovery = 0;
@@ -7713,6 +7751,13 @@ drop_it:
 	} else if ((tp->t_flags & TF_RCVD_TSTMP) == 0)
 		tp->t_flags &= ~TF_PREVVALID;
 	KMOD_TCPSTAT_INC(tcps_rexmttimeo);
+	TCP_EVENTLOG_RTO_LOG(tp->t_eventlog_session,
+	    tp->t_rxtshift,
+	    tp->t_rttlow,
+	    tp->t_srtt >> TCP_RTT_SHIFT,
+	    tp->t_maxseg,
+	    tp->snd_max - tp->snd_una,
+	    0);
 	if ((tp->t_state == TCPS_SYN_SENT) ||
 	    (tp->t_state == TCPS_SYN_RECEIVED))
 		rexmt = RACK_INITIAL_RTO * tcp_backoff[tp->t_rxtshift];
@@ -8719,6 +8764,13 @@ tcp_rack_xmit_timer_commit(struct tcp_rack *rack, struct tcpcb *tp)
 	RACK_TCPT_RANGESET(tp->t_rxtcur, RACK_REXMTVAL(tp),
 		      max(rack_rto_min, rtt + 2), rack_rto_max, rack->r_ctl.timer_slop);
 	rack_log_rtt_sample(rack, rtt);
+	TCP_EVENTLOG_RTT_LOG(tp->t_eventlog_session,
+	    rtt,
+	    tp->t_srtt,
+	    rack->r_ctl.rack_rs.rs_us_rtt,
+	    rack->r_ctl.rc_lowest_us_rtt,
+	    get_filter_value_small(&rack->r_ctl.rc_gp_min_rtt),
+	    rack->r_ctl.rc_gp_srtt);
 	tp->t_softerror = 0;
 }
 
@@ -10744,7 +10796,8 @@ rack_update_prr(struct tcpcb *tp, struct tcp_rack *rack, uint32_t changed, tcp_s
 
 static void
 rack_log_ack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th, int entered_recovery, int dup_ack_struck,
-	     int *dsack_seen, int *sacks_seen)
+	     int *dsack_seen, int *sacks_seen,
+	     int32_t *out_num_sack_blks, struct sackblk *out_sack_blocks)
 {
 	uint32_t changed;
 	struct tcp_rack *rack;
@@ -10985,6 +11038,11 @@ out:
 			rack->r_timer_override = 1;
 		}
 	}
+	if (out_num_sack_blks != NULL)
+		*out_num_sack_blks = num_sack_blks;
+	if (out_sack_blocks != NULL && num_sack_blks > 0)
+		memcpy(out_sack_blocks, sack_blocks,
+		    num_sack_blks * sizeof(struct sackblk));
 }
 
 static void
@@ -11697,6 +11755,8 @@ rack_process_ack(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	int32_t under_pacing = 0;
 	int32_t post_recovery = 0;
 	uint32_t p_cwnd;
+	struct sackblk sack_blocks[TCP_MAX_SACK + 1];
+	int32_t num_sack_blks = 0;
 
 	INP_WLOCK_ASSERT(tptoinpcb(tp));
 
@@ -11766,7 +11826,8 @@ rack_process_ack(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			dup_ack_struck = 1;
 		}
 		rack_log_ack(tp, to, th, ((in_rec == 0) && IN_FASTRECOVERY(tp->t_flags)),
-			     dup_ack_struck, &dsack_seen, &sacks_seen);
+			     dup_ack_struck, &dsack_seen, &sacks_seen,
+			     &num_sack_blks, sack_blocks);
 
 	}
 	if (__predict_false(SEQ_LEQ(th->th_ack, tp->snd_una))) {
@@ -11899,7 +11960,8 @@ rack_process_ack(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	 * related information. This typically means increasing the
 	 * congestion window.
 	 */
-	rack_ack_received(tp, rack, th->th_ack, nsegs, CC_ACK, post_recovery);
+	rack_ack_received(tp, rack, th->th_ack, nsegs, CC_ACK, post_recovery,
+	    num_sack_blks, sack_blocks);
 	if (post_recovery &&
 	    (tp->snd_cwnd > p_cwnd)) {
 		/* Must be non-newreno (cubic) getting too ahead of itself */
@@ -12279,14 +12341,16 @@ rack_process_data(struct mbuf *m, struct tcphdr *th, struct socket *so,
 #endif
 			rack_handle_delayed_ack(tp, rack, tlen, tfo_syn);
 			tp->rcv_nxt += tlen;
-			if (tlen &&
-			    ((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
-			    (tp->t_fbyte_in == 0)) {
-				tp->t_fbyte_in = ticks;
-				if (tp->t_fbyte_in == 0)
-					tp->t_fbyte_in = 1;
-				if (tp->t_fbyte_out && tp->t_fbyte_in)
-					tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+			if (tlen) {
+				if (((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
+				    (tp->t_fbyte_in == 0)) {
+					tp->t_fbyte_in = ticks;
+					if (tp->t_fbyte_in == 0)
+						tp->t_fbyte_in = 1;
+					if (tp->t_fbyte_out && tp->t_fbyte_in)
+						tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+				}
+				tcp_request_stamp_first_rcv(tp);
 			}
 			thflags = tcp_get_flags(th) & TH_FIN;
 			KMOD_TCPSTAT_ADD(tcps_rcvpack, nsegs);
@@ -12504,14 +12568,16 @@ rack_do_fastnewdata(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		tcp_clean_sackreport(tp);
 	KMOD_TCPSTAT_INC(tcps_preddat);
 	tp->rcv_nxt += tlen;
-	if (tlen &&
-	    ((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
-	    (tp->t_fbyte_in == 0)) {
-		tp->t_fbyte_in = ticks;
-		if (tp->t_fbyte_in == 0)
-			tp->t_fbyte_in = 1;
-		if (tp->t_fbyte_out && tp->t_fbyte_in)
-			tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+	if (tlen) {
+		if (((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
+		    (tp->t_fbyte_in == 0)) {
+			tp->t_fbyte_in = ticks;
+			if (tp->t_fbyte_in == 0)
+				tp->t_fbyte_in = 1;
+			if (tp->t_fbyte_out && tp->t_fbyte_in)
+				tp->t_flags2 |= TF2_FBYTES_COMPLETE;
+		}
+		tcp_request_stamp_first_rcv(tp);
 	}
 	/*
 	 * Pull snd_wl1 up to prevent seq wrap relative to th_seq.
@@ -12604,7 +12670,7 @@ rack_fastack(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		under_pacing = 1;
 	}
 	nsegs = max(1, m->m_pkthdr.lro_nsegs);
-	rack_log_ack(tp, to, th, 0, 0, NULL, NULL);
+	rack_log_ack(tp, to, th, 0, 0, NULL, NULL, NULL, NULL);
 	/* Did the window get updated? */
 	if (tiwin != tp->snd_wnd) {
 		tp->snd_wnd = tiwin;
@@ -12677,7 +12743,8 @@ rack_fastack(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	if (acked) {
 		struct mbuf *mfree;
 
-		rack_ack_received(tp, rack, th->th_ack, nsegs, CC_ACK, 0);
+		rack_ack_received(tp, rack, th->th_ack, nsegs, CC_ACK, 0,
+		    0, NULL);
 		SOCK_SENDBUF_LOCK(so);
 		mfree = sbcut_locked(&so->so_snd, acked);
 		tp->snd_una = th->th_ack;
@@ -12854,6 +12921,8 @@ rack_do_syn_sent(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		}
 
 		tcp_ecn_input_syn_sent(tp, thflags, iptos);
+
+		tcp_eventlog_conn_params(tp);
 
 		if (SEQ_GT(th->th_ack, tp->snd_una)) {
 			/*
@@ -15992,7 +16061,8 @@ rack_do_compressed_ack_processing(struct tcpcb *tp, struct socket *so, struct mb
 				p_cwnd <<= 1;
 				p_cwnd += tp->snd_cwnd;
 			}
-			rack_ack_received(tp, rack, high_seq, nsegs, CC_ACK, post_recovery);
+			rack_ack_received(tp, rack, high_seq, nsegs, CC_ACK, post_recovery,
+			    0, NULL);
 			if (post_recovery && (tp->snd_cwnd > p_cwnd)) {
 				/* Must be non-newreno (cubic) getting too ahead of itself */
 				tp->snd_cwnd = p_cwnd;
@@ -24724,6 +24794,12 @@ tcp_addrack(module_t mod, int32_t type, void *data)
 {
 	int32_t err = 0;
 	int num_stacks;
+	struct eventlog_provider_config cfg = {
+		.dump_callback = tcp_eventlog_dump_state,
+		.default_changed = tcp_eventlog_default_changed,
+		.decode_blob = tcp_eventlog_decode_blob,
+		.decode_blob_size = tcp_eventlog_decode_blob_size,
+	};
 
 	switch (type) {
 	case MOD_LOAD:
@@ -24752,6 +24828,7 @@ tcp_addrack(module_t mod, int32_t type, void *data)
 			goto free_uma;
 		}
 		rack_init_sysctls();
+		tcp_eventlog_provider_register(&__tcp_rack, &cfg);
 		num_stacks = nitems(rack_stack_names);
 		err = register_tcp_functions_as_names(&__tcp_rack, M_WAITOK,
 		    rack_stack_names, &num_stacks);
@@ -24759,6 +24836,7 @@ tcp_addrack(module_t mod, int32_t type, void *data)
 			printf("Failed to register %s stack name for "
 			    "%s module\n", rack_stack_names[num_stacks],
 			    __XSTRING(MODNAME));
+			tcp_eventlog_provider_unregister(&__tcp_rack);
 			sysctl_ctx_free(&rack_sysctl_ctx);
 free_uma:
 			uma_zdestroy(rack_zone);
@@ -24785,6 +24863,7 @@ free_uma:
 			rack_mod_inited = false;
 		}
 		tcp_lro_dereg_mbufq();
+		tcp_eventlog_provider_unregister(&__tcp_rack);
 		err = 0;
 		break;
 	default:

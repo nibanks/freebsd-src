@@ -32,6 +32,7 @@
 
 #include <sys/param.h>
 #include <sys/pmc.h>
+#include <sys/pmc_sample.h>
 #include <sys/pmckern.h>
 #include <sys/systm.h>
 
@@ -39,6 +40,8 @@
 #include <machine/cputypes.h>
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
+
+#include "hwpmc_core.h"
 
 static int
 intel_switch_in(struct pmc_cpu *pc, struct pmc_process *pp)
@@ -392,5 +395,27 @@ pmc_intel_finalize(struct pmc_mdep *md)
 		break;
 	default:
 		break;
+	}
+}
+
+/*
+ * Resolve a pmc_sample(9) logical event (see sys/pmc_sample.h) to an
+ * IAF class/config, for the in-kernel sampling KPI in hwpmc_kapi.c.
+ */
+int
+pmc_intel_resolve_sample_event(enum pmc_sample_event ev,
+    struct pmc_op_pmcallocate *pa)
+{
+
+	switch (ev) {
+	case PMC_SAMPLE_EV_CPU_CYCLES:
+		/* IAF CPU_CLK_UNHALTED.REF, frequency-invariant by design. */
+		pa->pm_class = PMC_CLASS_IAF;
+		pa->pm_md.pm_iap.pm_iap_config = IAP_EVSEL(0x3C) |
+		    IAP_UMASK(0x01) | IAP_OS | IAP_USR | IAP_INT;
+		pa->pm_md.pm_iap.pm_iap_rsp = 0;
+		return (0);
+	default:
+		return (ENOTSUP);
 	}
 }

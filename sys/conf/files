@@ -3921,6 +3921,10 @@ kern/kern_dump.c		standard
 kern/kern_environment.c		standard
 kern/kern_et.c			standard
 kern/kern_event.c		standard
+kern/kern_eventlog.c		standard
+kern/kern_cpu_eventlog.c	optional hwpmc
+kern/kern_symbols_eventlog.c	standard
+kern/kern_process_eventlog.c	standard
 kern/kern_exec.c		standard
 kern/kern_exit.c		standard
 kern/kern_fail.c		standard
@@ -4286,6 +4290,7 @@ net/if_edsc.c			optional edsc
 net/if_enc.c			optional enc inet | enc inet6
 net/if_epair.c			optional epair
 net/if_ethersubr.c		optional ether
+net/if_eventlog.c		standard
 net/if_fwsubr.c			optional fwip
 net/if_gif.c			optional gif inet | gif inet6 | \
 					 netgraph_gif inet | netgraph_gif inet6

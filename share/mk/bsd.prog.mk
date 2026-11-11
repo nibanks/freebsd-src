@@ -250,6 +250,12 @@ CLEANFILES+= ${PROG} ${PROG}.bc ${PROG}.ll
 CLEANFILES+= ${OBJS} ${BCOBJS} ${LLOBJS}
 .endif
 
+# Generate the user-space eventlog producer header and link libeventlog when
+# EVENTLOG_SCHEMA is set.  Must precede bsd.libnames.mk so its LIBADD applies.
+.if !empty(EVENTLOG_SCHEMA)
+.include <bsd.eventlog.mk>
+.endif
+
 .include <bsd.libnames.mk>
 
 .if defined(PROG)

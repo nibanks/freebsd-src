@@ -55,7 +55,10 @@ SUBDIR=	${SUBDIR_BOOTSTRAP} \
 	libdwarf \
 	libedit \
 	libelftc \
+	libelog_user_symbols \
+	libelog_source_lines \
 	libevent1 \
+	libeventlog \
 	libexecinfo \
 	libexpat \
 	libfetch \
@@ -135,6 +138,8 @@ SUBDIR_DEPEND_libcasper= libnv
 SUBDIR_DEPEND_libcrypt= libmd
 SUBDIR_DEPEND_libdevstat= libkvm
 SUBDIR_DEPEND_libedit= ncurses
+SUBDIR_DEPEND_libelog_user_symbols= libelf
+SUBDIR_DEPEND_libelog_source_lines= libelf libdwarf
 SUBDIR_DEPEND_libgeom= libexpat libsbuf
 .if ${MK_MITKRB5} == "no"
 SUBDIR_DEPEND_librpcsec_gss= libgssapi

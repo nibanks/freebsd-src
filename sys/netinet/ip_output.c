@@ -76,6 +76,7 @@
 #include <netinet/in_rss.h>
 #include <netinet/in_var.h>
 #include <netinet/ip_var.h>
+#include <net/if_proto.h>
 #include <netinet/ip_options.h>
 #include <netinet/ip_mroute.h>
 
@@ -213,7 +214,8 @@ ip_output_send(struct inpcb *inp, struct ifnet *ifp, struct mbuf *m,
 	struct ktls_session *tls = NULL;
 #endif
 	struct m_snd_tag *mst;
-	int error;
+	int error, pktlen;
+	uint8_t proto;
 
 	MPASS((m->m_pkthdr.csum_flags & CSUM_SND_TAG) == 0);
 	mst = NULL;
@@ -270,7 +272,14 @@ ip_output_send(struct inpcb *inp, struct ifnet *ifp, struct mbuf *m,
 		m->m_pkthdr.csum_flags |= CSUM_SND_TAG;
 	}
 
+	/* Captured before if_output(), which may free m even on success;
+	 * only counted after, so a silently dropped packet (e.g. a full
+	 * send queue) doesn't inflate tcp/udp/other relative to obytes. */
+	proto = mtod(m, struct ip *)->ip_p;
+	pktlen = m->m_pkthdr.len;
 	error = (*ifp->if_output)(ifp, m, gw, ro);
+	if (error == 0)
+		if_proto_inc_counter(ifp, proto, false, pktlen);
 
 done:
 	/* Check for route change invalidating send tags. */

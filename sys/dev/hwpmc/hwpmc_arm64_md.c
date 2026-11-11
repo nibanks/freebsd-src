@@ -30,6 +30,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/pmc.h>
+#include <sys/pmc_sample.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -39,6 +40,26 @@
 #include <machine/pmc_mdep.h>
 #include <machine/stack.h>
 #include <machine/vmparam.h>
+
+/*
+ * Resolve a pmc_sample(9) logical event to an ARMv8 PMUv3 class/config
+ * for the in-kernel sampling KPI in hwpmc_kapi.c.
+ */
+int
+pmc_md_resolve_sample_event(enum pmc_sample_event ev,
+    struct pmc_op_pmcallocate *pa)
+{
+
+	switch (ev) {
+	case PMC_SAMPLE_EV_CPU_CYCLES:
+		/* ARMv8 PMUv3 CPU_CYCLES (architectural event 0x11). */
+		pa->pm_class = PMC_CLASS_ARMV8;
+		pa->pm_md.pm_md_config = 0x11;
+		return (0);
+	default:
+		return (ENOTSUP);
+	}
+}
 
 struct pmc_mdep *
 pmc_md_initialize(void)

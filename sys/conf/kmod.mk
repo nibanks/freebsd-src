@@ -491,6 +491,19 @@ bhnd_nvram_map.h:
 	    ${SYSDIR}/dev/bhnd/nvram/nvram_map -h
 .endif
 
+.if !empty(EVENTLOG_SCHEMA)
+# Generate this module's eventlog producer header via make dependencies (see
+# conf/eventlog.mk), into the module's own object directory so parallel module
+# builds sharing a schema never write a common file.
+EVENTLOG_SCHEMAS=	${EVENTLOG_SCHEMA}
+.include "${SYSDIR}/conf/eventlog.mk"
+.if !empty(EVENTLOG_HEADERS)
+SRCS+=		${EVENTLOG_HEADERS}
+CFLAGS+=	${EVENTLOG_INCLUDE}
+beforedepend: ${EVENTLOG_HEADERS}
+.endif
+.endif
+
 .if !empty(SRCS:Mbhnd_nvram_map_data.h)
 CLEANFILES+=	bhnd_nvram_map_data.h
 bhnd_nvram_map_data.h: ${SYSDIR}/dev/bhnd/tools/nvram_map_gen.awk \

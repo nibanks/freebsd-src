@@ -25,6 +25,7 @@ bsd.dep.mk		- handle Makefile dependencies
 bsd.dirs.mk		- handle directory creation
 bsd.doc.mk		- building troff system documents
 bsd.endian.mk		- TARGET_ENDIAN=1234(little) or 4321 (big) for target
+bsd.eventlog.mk		- user-space eventlog producer header generation
 bsd.files.mk		- install of general purpose files
 bsd.incs.mk		- install of include files
 bsd.info.mk		- building GNU Info hypertext system (deprecated)

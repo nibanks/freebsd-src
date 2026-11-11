@@ -100,6 +100,7 @@
 #include <netinet/in.h>
 #include <netinet/in_kdtrace.h>
 #include <netinet/ip_var.h>
+#include <net/if_proto.h>
 #include <netinet/in_systm.h>
 #include <net/if_llatbl.h>
 #ifdef INET
@@ -506,6 +507,7 @@ ip6_direct_input(struct mbuf *m)
 		}
 #endif /* IPSEC */
 
+		if_proto_inc_counter_ip6(m->m_pkthdr.rcvif, nxt, true, m->m_pkthdr.len);
 		nxt = ip6_protox[nxt](&m, &off, nxt);
 	}
 	return;
@@ -926,6 +928,7 @@ passin:
 		}
 #endif /* IPSEC */
 
+		if_proto_inc_counter_ip6(rcvif, nxt, true, m->m_pkthdr.len);
 		nxt = ip6_protox[nxt](&m, &off, nxt);
 	}
 	return;

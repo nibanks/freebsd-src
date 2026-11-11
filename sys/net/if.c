@@ -78,6 +78,7 @@
 #include <net/if_arp.h>
 #include <net/if_clone.h>
 #include <net/if_dl.h>
+#include <net/if_eventlog.h>
 #include <net/if_strings.h>
 #include <net/if_types.h>
 #include <net/if_var.h>
@@ -2685,10 +2686,13 @@ ifhwioctl(u_long cmd, struct ifnet *ifp, caddr_t data, struct thread *td)
 		ifp->if_fib = ifr->ifr_fib;
 		break;
 
-	case SIOCSIFFLAGS:
+	case SIOCSIFFLAGS: {
+		int old_flags;
+
 		error = priv_check(td, PRIV_NET_SETIFFLAGS);
 		if (error)
 			return (error);
+		old_flags = ifp->if_flags;
 		/*
 		 * Currently, no driver owned flags pass the IFF_CANTCHANGE
 		 * check, so we don't need special handling here yet.
@@ -2723,9 +2727,14 @@ ifhwioctl(u_long cmd, struct ifnet *ifp, caddr_t data, struct thread *td)
 		if (do_ifup)
 			if_up(ifp);
 		getmicrotime(&ifp->if_lastchange);
+		if_eventlog_log_flags_change(ifp, (uint32_t)old_flags,
+		    (uint32_t)ifp->if_flags);
 		break;
+	}
 
-	case SIOCSIFCAP:
+	case SIOCSIFCAP: {
+		int old_capenable;
+
 		error = priv_check(td, PRIV_NET_SETIFCAP);
 		if (error != 0)
 			return (error);
@@ -2733,12 +2742,20 @@ ifhwioctl(u_long cmd, struct ifnet *ifp, caddr_t data, struct thread *td)
 			return (EOPNOTSUPP);
 		if (ifr->ifr_reqcap & ~ifp->if_capabilities)
 			return (EINVAL);
+		old_capenable = ifp->if_capenable;
 		error = (*ifp->if_ioctl)(ifp, cmd, data);
-		if (error == 0)
+		if (error == 0) {
 			getmicrotime(&ifp->if_lastchange);
+			if_eventlog_log_caps_change(ifp,
+			    (uint32_t)old_capenable,
+			    (uint32_t)ifp->if_capenable);
+		}
 		break;
+	}
 
-	case SIOCSIFCAPNV:
+	case SIOCSIFCAPNV: {
+		int old_capenable;
+
 		error = priv_check(td, PRIV_NET_SETIFCAP);
 		if (error != 0)
 			return (error);
@@ -2750,6 +2767,7 @@ ifhwioctl(u_long cmd, struct ifnet *ifp, caddr_t data, struct thread *td)
 			return (EINVAL);
 		nvcap = NULL;
 		buf = malloc(ifr->ifr_cap_nv.length, M_TEMP, M_WAITOK);
+		old_capenable = ifp->if_capenable;
 		for (;;) {
 			error = copyin(ifr->ifr_cap_nv.buffer, buf,
 			    ifr->ifr_cap_nv.length);
@@ -2781,9 +2799,14 @@ ifhwioctl(u_long cmd, struct ifnet *ifp, caddr_t data, struct thread *td)
 		}
 		nvlist_destroy(nvcap);
 		free(buf, M_TEMP);
-		if (error == 0)
+		if (error == 0) {
 			getmicrotime(&ifp->if_lastchange);
+			if_eventlog_log_caps_change(ifp,
+			    (uint32_t)old_capenable,
+			    (uint32_t)ifp->if_capenable);
+		}
 		break;
+	}
 
 #ifdef MAC
 	case SIOCSIFMAC:
@@ -2848,6 +2871,8 @@ ifhwioctl(u_long cmd, struct ifnet *ifp, caddr_t data, struct thread *td)
 		 */
 		if (ifp->if_mtu != oldmtu)
 			if_notifymtu(ifp);
+		if_eventlog_log_mtu_change(ifp, (uint32_t)oldmtu,
+		    (uint32_t)ifp->if_mtu);
 		break;
 	}
 

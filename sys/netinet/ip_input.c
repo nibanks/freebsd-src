@@ -74,6 +74,7 @@
 #include <netinet/in_fib.h>
 #include <netinet/in_pcb.h>
 #include <netinet/ip_var.h>
+#include <net/if_proto.h>
 #include <netinet/ip_encap.h>
 #include <netinet/ip_fw.h>
 #include <netinet/ip_icmp.h>
@@ -463,6 +464,7 @@ ip_direct_input(struct mbuf *m)
 	}
 #endif /* IPSEC */
 	IPSTAT_INC(ips_delivered);
+	if_proto_inc_counter(m->m_pkthdr.rcvif, ip->ip_p, true, m->m_pkthdr.len);
 	ip_protox[ip->ip_p](&m, &hlen, ip->ip_p);
 }
 #endif
@@ -877,6 +879,7 @@ ours:
 	 * Switch out to protocol's input routine.
 	 */
 	IPSTAT_INC(ips_delivered);
+	if_proto_inc_counter(ifp, ip->ip_p, true, m->m_pkthdr.len);
 
 	ip_protox[ip->ip_p](&m, &hlen, ip->ip_p);
 	return;

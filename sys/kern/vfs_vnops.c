@@ -48,6 +48,9 @@
 #include <sys/buf.h>
 #include <sys/disk.h>
 #include <sys/dirent.h>
+#include <sys/eventlog_process.h>
+#include <sys/eventlog_symbols.h>
+#include <eventlog/process_eventlog.h>
 #include <sys/fail.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
@@ -3224,6 +3227,26 @@ vn_mmap(struct file *fp, vm_map_t map, vm_offset_t *addr, vm_size_t size,
 		}
 	}
 #endif
+
+	if ((prot & VM_PROT_EXECUTE) != 0 && error == 0 &&
+	    PROCESS_EVENTLOG_PROC_MAP_ENABLED(proc_elog_session)) {
+		char *fullpath, *freepath;
+		uint32_t user_file_id;
+
+		fullpath = "";
+		freepath = NULL;
+		if (vp != NULL && vn_fullpath(vp, &fullpath, &freepath) != 0) {
+			fullpath = "";
+			freepath = NULL;
+		}
+		user_file_id = 0;
+		(void)eventlog_symbols_intern_user_file(vp, fullpath,
+		    &user_file_id);
+		PROCESS_EVENTLOG_PROC_MAP_LOG_ALWAYS(proc_elog_session,
+		    (uint32_t)td->td_proc->p_pid, user_file_id,
+		    (uint64_t)(uintptr_t)*addr, (uint64_t)size, (uint64_t)foff);
+		free(freepath, M_TEMP);
+	}
 
 	return (error);
 }

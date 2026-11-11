@@ -1,0 +1,558 @@
+.\"-
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.\" Copyright (c) 2026 Netflix, Inc.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd August 17, 2026
+.Dt ELOG 5
+.Os
+.Sh NAME
+.Nm elog
+.Nd eventlog binary capture file format
+.Sh DESCRIPTION
+An
+.Nm
+file stores a captured sequence of kernel events produced by the
+.Xr eventlog 9
+framework.
+Files are created by the
+.Xr elog 1
+utility using the
+.Fl o
+option and can be read back with the
+.Fl r
+option.
+.Pp
+All multi-byte integer fields are in host-native byte order
+.Pq little-endian on amd64 and aarch64 .
+.Pp
+An
+.Nm
+file consists of the following contiguous sections:
+.Bd -literal -offset indent
+[file header (36 bytes)]
+[header counters (N*8 bytes)]
+[provider table (4 + N*50-byte entries)]
+[decode-blob section]      (optional)
+[event stream]
+.Ed
+.Pp
+The decode-blob section is optional (see the
+.Sx Decode Blob Section
+subsection).
+.Ss File Header
+The version 3 file header is 36 bytes, packed with no padding; version 2 is
+40, with an 8-byte
+.Va dropped_events
+in place of the trailing
+.Va counter_count :
+.Bl -column "Offset" "Size" "uint64_t" "counter_count" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 4 Ta Vt char[4] Ta Va magic
+.It 4 Ta 4 Ta Vt uint32_t Ta Va version
+.It 8 Ta 8 Ta Vt uint64_t Ta Va capture_start
+.It 16 Ta 8 Ta Vt uint64_t Ta Va start_utc_us
+.It 24 Ta 8 Ta Vt uint64_t Ta Va event_count
+.It 32 Ta 4 Ta Vt uint32_t Ta Va counter_count
+.El
+.Pp
+The fields are:
+.Bl -tag -width indent
+.It Va magic
+The four ASCII bytes
+.Dq ELOG
+.Pq Li 0x45 0x4C 0x4F 0x47 .
+A consumer must verify this field before proceeding.
+.It Va version
+Format version number.
+The current version, and the only one written, is 3: each provider table
+entry carries a
+.Va schema_id ,
+an optional decode-blob section follows the provider table (see
+.Sx Decode Blob Section ) ,
+and the header carries the counter array described in
+.Sx Header Counters .
+Version 2 is identical except that the header is a fixed 40 bytes, with a
+single
+.Vt uint64_t
+.Va dropped_events
+counter in place of
+.Va counter_count
+and the counter array.
+Because version 2 shipped in a release its on-disk layout cannot be changed
+in place, which is why version 3 is a new version rather than a redefinition
+of version 2.
+Version 1 (historical: no
+.Va schema_id ,
+no decode-blob section, no counter array) is obsolete.
+.Xr elog 1
+reads version 2 and version 3 files and rejects version 1.
+A consumer should reject any other version.
+.It Va capture_start
+Capture start, in microseconds since boot.
+.It Va start_utc_us
+UTC wall-clock time at capture start, in microseconds since the Unix epoch.
+Used together with
+.Va capture_start
+to convert event timestamps to UTC:
+.Bd -literal -offset indent
+utc_us = start_utc_us + (event.timestamp - capture_start)
+.Ed
+.Pp
+The two name the same instant, which is what makes that conversion hold.
+An event may carry a timestamp below
+.Va capture_start :
+a user-space producer writes its identity record when it registers with
+.Xr eventlog_user 3 ,
+so a capture that drains a long-running provider's ring picks up records
+from before it started.
+Those convert to a UTC time before
+.Va start_utc_us .
+.It Va event_count
+Total number of events in the file.
+Written as 0 initially and updated by seeking back to the header when
+capture ends.
+May be 0 if the capturing tool was killed.
+.It Va counter_count
+Number of
+.Vt uint64_t
+counters immediately following the header; see
+.Sx Header Counters .
+.El
+.Pp
+The C structure is:
+.Bd -literal -offset indent
+struct elog_binary_header {
+	char     magic[4];
+	uint32_t version;
+	uint64_t capture_start;
+	uint64_t start_utc_us;
+	uint64_t event_count;
+	uint32_t counter_count;
+} __packed;
+.Ed
+.Pp
+.Va counter_count
+packed
+.Vt uint64_t
+values immediately follow the header; see
+.Sx Header Counters .
+.Ss Header Counters
+Immediately after the file header,
+.Va counter_count
+packed
+.Vt uint64_t
+values record drop statistics as of the last time the header was
+(re)written.
+The array is indexed positionally and append-only: a given index's meaning
+is fixed for the life of the format, new counters are only ever added at
+the end, and a reader treats any index at or beyond the file's own
+.Va counter_count
+as unavailable
+.Pq value 0
+rather than an error.
+This lets a newer
+.Xr elog 1
+read an older file that has fewer counters, and an older
+.Xr elog 1
+read a newer file with more, without a format-version change either way.
+.Pp
+The currently defined indices are:
+.Bl -column "Index" "ELOG_COUNTER_USER_DROPPED_PREJOIN" -offset indent
+.It Sy Index Ta Sy Name Ta Sy Meaning
+.It 0 Ta Dv ELOG_COUNTER_KERNEL_DROPPED Ta Kernel per-CPU buffer-full drops
+.It 1 Ta Dv ELOG_COUNTER_USER_DROPPED_FULL Ta User-stream buffer-full drops
+.It 2 Ta Dv ELOG_COUNTER_USER_DROPPED_PREJOIN Ta User events older than the join point
+.It 3 Ta Dv ELOG_COUNTER_USER_DROPPED_LATE Ta User events older than the stream's last delivered
+.El
+.Pp
+.Dv ELOG_COUNTER_KERNEL_DROPPED
+counts events the kernel dropped due to full per-CPU buffers during
+capture, regardless of provider kind.
+The remaining three counters apply only to user-space producers
+.Pq see Xr eventlog_user 3 :
+.Dv ELOG_COUNTER_USER_DROPPED_FULL
+counts events dropped because a producer's kernel-side per-stream buffer
+filled before the subscriber drained it;
+.Dv ELOG_COUNTER_USER_DROPPED_PREJOIN
+counts events older than the subscriber's join point, i.e. the producer's
+stream first appeared mid-capture and some of its history predates the
+subscription;
+.Dv ELOG_COUNTER_USER_DROPPED_LATE
+counts events whose timestamp is older than one already delivered for the
+same stream, an ordering violation that usually indicates a producer bug.
+.Pp
+All counters are cumulative as of the last header write, not a true
+per-file delta: when one capture spans several files
+.Pq Fl o Cm dir= Ns Ar path No or Fl -roll- Ns Ar * ,
+a drop that occurs while one file is open cannot be attributed to that
+file alone if the same kernel subscriber later writes further files, since
+the drop counts are shared across the whole subscription.
+.Ss Provider Table
+Immediately after the header counters, the provider table maps numeric
+.Va provider_id
+values found in event headers to human-readable provider names and to a
+content-addressed
+.Va schema_id .
+.Pp
+The table starts with a 4-byte count:
+.Bl -column "Offset" "Size" "uint32_t" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 4 Ta Vt uint32_t Ta Va count
+.El
+.Pp
+This is followed by
+.Va count
+packed 50-byte entries:
+.Bl -column "Offset" "Size" "uint16_t" "provider_id" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 2 Ta Vt uint16_t Ta Va provider_id
+.It 2 Ta 32 Ta Vt char[32] Ta Va name
+.It 34 Ta 16 Ta Vt uint8_t[16] Ta Va schema_id
+.El
+.Pp
+The
+.Va name
+field is null-terminated and zero-padded to 32 bytes.
+Multiple entries may share the same name when multiple kernel subsystems
+register providers under the same name
+.Pq see Xr eventlog 9 .
+The number of entries is not fixed: the capturing tool queries the kernel
+for the full set of live providers, so the table grows to match.
+.Pp
+The
+.Va schema_id
+is the SHA-256 of the provider's decode blob truncated to 16 bytes
+.Pq see Xr eventlog 9 ;
+it is all-zero when the provider registered no decode blob.
+It is the durable key that binds this capture's
+.Va provider_id
+values to a specific schema, so the file can be decoded later
+.Pq even after a reboot reassigns Va provider_id Ns s
+against the matching blob in the decode-blob section or the live kernel.
+.Pp
+The total provider table size is
+.Li 4 + count * 50
+bytes.
+.Pp
+The C structure for each entry is:
+.Bd -literal -offset indent
+struct eventlog_provider_info {
+	uint16_t provider_id;
+	char     name[EVENTLOG_PROVIDER_NAME_MAX];
+	uint8_t  schema_id[16];
+} __packed;
+.Ed
+.Ss Decode Blob Section
+This optional section carries the per-provider
+.Dq decode blobs
+(see
+.Xr eventlog 9
+and
+.In sys/eventlog_decode.h )
+that
+.Xr elog 1
+uses to decode events at runtime, so a version 3 file can be decoded on a host
+that does not run the originating kernel.
+.Pp
+The section begins with a 4-byte count:
+.Bl -column "Offset" "Size" "uint32_t" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 4 Ta Vt uint32_t Ta Va blob_count
+.El
+.Pp
+A
+.Va blob_count
+of zero means no blobs were embedded
+.Pq the file was written with Fl N ;
+the section is then just the 4-byte count.
+Otherwise
+.Va blob_count
+entries follow.
+Blobs are deduplicated by
+.Va schema_id ,
+so each distinct schema appears once regardless of how many
+.Va provider_id
+values map to it.
+Each entry consists of the 16-byte
+.Va schema_id ,
+a 4-byte blob size, and that many raw blob bytes:
+.Bl -column "Size" "uint8_t[16]" "schema_id" -offset indent
+.It Sy Size Ta Sy Type Ta Sy Field
+.It 16 Ta Vt uint8_t[16] Ta Va schema_id
+.It 4 Ta Vt uint32_t Ta Va blob_size
+.It Va blob_size Ta Vt uint8_t[] Ta Va blob
+.El
+.Pp
+The
+.Va schema_id
+matches a provider table entry's
+.Va schema_id
+.Pq the SHA-256-truncation of the blob bytes, see Sx Provider Table .
+The
+.Va blob
+contents are described by
+.In sys/eventlog_decode.h ;
+its first four bytes are the ASCII magic
+.Dq EDB1 .
+When decoding a file
+.Pq Xr elog 1 Fl r ,
+each provider table entry is resolved by its
+.Va schema_id :
+the embedded blob is used if present, otherwise the blob is fetched from the
+live kernel by
+.Va schema_id ,
+and decoding fails if neither source has it.
+Version 1 files predate the
+.Va schema_id
+entirely and are no longer read.
+Version 2 files carry the same provider table and decode-blob section as
+version 3, differing only in the header
+.Pq see Sx File Header ,
+and are read normally.
+.Ss Event Stream
+The remainder of the file is a packed sequence of events in timestamp
+order.
+Each event consists of a 32-byte header followed by a variable-length
+payload:
+.Bd -literal -offset indent
+[header (32 bytes)][payload (0+ bytes)]
+.Ed
+.Pp
+Events are packed back-to-back with no inter-event padding.
+The event header layout is:
+.Bl -column "Offset" "Size" "uint64_t" "event_length" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 2 Ta Vt uint16_t Ta Va event_length
+.It 2 Ta 2 Ta Vt uint16_t Ta Va cpu
+.It 4 Ta 2 Ta Vt uint16_t Ta Va provider_id
+.It 6 Ta 2 Ta Vt uint16_t Ta (reserved)
+.It 8 Ta 8 Ta Vt uint64_t Ta Va timestamp
+.It 16 Ta 8 Ta Vt uint64_t Ta Va session_id
+.It 24 Ta 4 Ta Vt uint32_t Ta Va event_id
+.It 28 Ta 4 Ta Vt int32_t Ta Va thread_id
+.El
+.Pp
+The
+.Va event_length
+field gives the total event size in bytes, including the header.
+The minimum value is 32
+.Pq header only, no payload ;
+the maximum is 65535.
+A parser advances to the next event by adding
+.Va event_length
+to the current event's offset.
+.Pp
+The
+.Va provider_id
+maps to a provider name via the provider table.
+The
+.Va timestamp
+is in microseconds since boot; convert to UTC using the formula
+described in the file header section.
+The
+.Va session_id
+is provider-defined.
+The reserved field at offset 6 is written as zero and must be ignored.
+.Pp
+Three
+.Va event_id
+values are reserved across all providers:
+.Bl -column "EVENTLOG_SESSION_CREATE_ID" "0xFFFFFFFE" -offset indent
+.It Sy Constant Ta Sy Value Ta Sy Meaning
+.It Dv EVENTLOG_SESSION_CREATE_ID Ta Li 0xFFFFFFFE Ta Session created
+.It Dv EVENTLOG_SESSION_END_ID Ta Li 0xFFFFFFFF Ta Session destroyed
+.It Dv EVENTLOG_DUMP_COMPLETE_ID Ta Li 0xFFFFFFFD Ta Dump-state replay finished
+.El
+.Pp
+Two further
+.Va event_id
+values
+.Pq Dv EVENTLOG_PROVIDER_INFO_ID / Dv EVENTLOG_PROVIDER_BLOB_ID ,
+aliased in
+.Xr elog 1
+as
+.Dv ELOG_EVENT_PROVIDER_*_ID
+are reserved for provider-announcement bookkeeping.
+They are synthesised by the kernel at late bind and also by
+.Xr elog 1
+when writing a binary file; see
+.Sx Provider Announcement Records :
+.Bl -column "ELOG_EVENT_PROVIDER_INFO_ID" "0xFFFFFFFC" -offset indent
+.It Sy Constant Ta Sy Value Ta Sy Meaning
+.It Dv ELOG_EVENT_PROVIDER_INFO_ID Ta Li 0xFFFFFFFC Ta Provider-table entry, embedded mid-stream
+.It Dv ELOG_EVENT_PROVIDER_BLOB_ID Ta Li 0xFFFFFFFB Ta Decode blob, embedded mid-stream
+.El
+.Pp
+The
+.Dv EVENTLOG_SESSION_END_ID
+and
+.Dv EVENTLOG_DUMP_COMPLETE_ID
+events have an empty payload
+.Pq 0 bytes .
+All other payload formats are provider-specific and defined by schema files.
+The payload size is
+.Va event_length
+minus 32.
+.Pp
+Identity/metadata events
+.Po
+.Dv EVENTLOG_SESSION_CREATE_ID No and Dv EVENTLOG_DUMP_COMPLETE_ID
+.Pc
+and provider-specific state such as the
+.Li symbols
+provider's
+.Li USER_FILE
+or the
+.Li process
+provider's
+.Li PROC_EXEC
+are not guaranteed to appear only once per capture.
+The
+.Fl -roll-time
+mode of
+.Xr elog 1
+re-emits them at every rolled-file boundary so each file decodes
+independently; a parser must treat a repeat sighting of the same key
+.Pq e.g. Va session_id No or a provider's own identity key
+as replacing the earlier one, not as an error or a duplicate to reject.
+.Pp
+The event stream may end with an incomplete event at EOF if the capture
+was interrupted.
+Parsers should stop when fewer than 32 bytes remain or when
+.Va event_length
+exceeds the remaining data.
+.Ss Provider Announcement Records
+The provider table and decode-blob section
+.Pq Sx Provider Table , Sx Decode Blob Section
+are written once, when a file is opened, from the set of providers the
+kernel reports at that moment
+.Pq via Dv EVENTLOG_IOCTL_GET_PROVIDERS2 .
+A provider that registers with
+.Xr eventlog 9
+later in the capture is not in that snapshot.
+The kernel synthesises an
+.Dv EVENTLOG_PROVIDER_INFO_ID
+record
+.Pq and, when the decode blob fits in one event, an Dv EVENTLOG_PROVIDER_BLOB_ID
+record
+into every subscriber that just bound the provider, so the identity is in
+the stream even if the provider unregisters before the next poll.
+.Xr elog 1
+applies those records to its provider map and decode registry and embeds
+them into the output file; it also synthesises the same records itself the
+first time it is about to write an event from a provider not already
+covered by the file's provider table or by an earlier announcement in this
+same file
+.Pq belt-and-suspenders for rolled-file re-announcement and older kernels .
+Both use the ordinary event header; a reader that does not know about them
+can safely skip them like any other unrecognized
+.Va event_id .
+.Pp
+An
+.Dv ELOG_EVENT_PROVIDER_INFO_ID
+record's payload is a single packed
+.Vt struct eventlog_provider_info
+.Pq the same 50-byte layout as a provider table entry; see Sx Provider Table :
+.Bl -column "Offset" "Size" "uint16_t" "provider_id" -offset indent
+.It Sy Offset Ta Sy Size Ta Sy Type Ta Sy Field
+.It 0 Ta 2 Ta Vt uint16_t Ta Va provider_id
+.It 2 Ta 32 Ta Vt char[32] Ta Va name
+.It 34 Ta 16 Ta Vt uint8_t[16] Ta Va schema_id
+.El
+.Pp
+A reader applies it exactly as it would a provider table entry: upserting
+by
+.Va provider_id
+into its provider map.
+.Pp
+An
+.Dv ELOG_EVENT_PROVIDER_BLOB_ID
+record's payload is a
+.Va schema_id ,
+a 4-byte blob size, and that many raw decode-blob bytes, the same layout as
+one decode-blob section entry
+.Pq see Sx Decode Blob Section :
+.Bl -column "Size" "uint8_t[16]" "schema_id" -offset indent
+.It Sy Size Ta Sy Type Ta Sy Field
+.It 16 Ta Vt uint8_t[16] Ta Va schema_id
+.It 4 Ta Vt uint32_t Ta Va blob_size
+.It Va blob_size Ta Vt uint8_t[] Ta Va blob
+.El
+.Pp
+The record's total size is bounded by
+.Va event_length
+.Pq a Vt uint16_t covering the whole event ,
+so a blob too large to fit is not embedded this way: elog(1) instead warns
+and leaves that provider's events to be decoded from the live kernel by
+.Va schema_id
+on replay, the same fallback used when a file was written with
+.Fl N .
+No provider's decode blob is expected to approach this limit in practice.
+.Pp
+Both records are idempotent per output file: elog(1) writes each provider
+at most once and each schema at most once per file, and a reader that sees
+a repeat sighting of the same
+.Va provider_id
+or
+.Va schema_id
+.Pq e.g. across rolled files
+treats it as replacing the earlier one, per the general rule in
+.Sx Event Stream .
+Embedding this way does not change the file format version; the records
+are additive to version 3 and an old
+.Xr elog 1
+that predates them still decodes the rest of the file correctly, simply
+without the late-registering provider's events.
+.Ss Compressed Files
+The
+.Xr elog 1
+utility also accepts
+.Pa .gz Ns -compressed
+files
+.Pq detected by file extension .
+The decompressed content has the same format described above.
+.Sh EXAMPLES
+Capture TCP events to a binary file:
+.Bd -literal -offset indent
+elog -c tcp -o /tmp/events.elog
+.Ed
+.Pp
+Read back as formatted text:
+.Bd -literal -offset indent
+elog -r /tmp/events.elog
+.Ed
+.Pp
+Read a compressed capture:
+.Bd -literal -offset indent
+elog -r /tmp/events.elog.gz
+.Ed
+.Sh SEE ALSO
+.Xr elog 1 ,
+.Xr eventlog 9
+.Sh HISTORY
+The
+.Nm
+file format first appeared in
+.Fx 16.0 .
