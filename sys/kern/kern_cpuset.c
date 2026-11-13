@@ -311,6 +311,19 @@ cpuset_lookup(cpusetid_t setid, struct thread *td)
 }
 
 /*
+ * Keep CPU_SET_ONECPU in step with cs_mask.  Called wherever the mask changes.
+ */
+static void
+cpuset_flags_update(struct cpuset *set)
+{
+
+	if (CPU_COUNT(&set->cs_mask) == 1)
+		set->cs_flags |= CPU_SET_ONECPU;
+	else
+		set->cs_flags &= ~CPU_SET_ONECPU;
+}
+
+/*
  * Initialize a set in the space provided in 'set' with the provided parameters.
  * The set is returned with a single ref.  May return EDEADLK if the set
  * will have no valid cpu based on restrictions from the parent.
@@ -336,6 +349,7 @@ cpuset_init(struct cpuset *set, struct cpuset *parent,
 	mtx_lock_spin(&cpuset_lock);
 	set->cs_domain = domain;
 	CPU_AND(&set->cs_mask, &set->cs_mask, &parent->cs_mask);
+	cpuset_flags_update(set);
 	set->cs_id = id;
 	set->cs_parent = cpuset_ref(parent);
 	LIST_INSERT_HEAD(&parent->cs_children, set, cs_siblings);
@@ -677,6 +691,7 @@ cpuset_update(struct cpuset *set, cpuset_t *mask)
 
 	mtx_assert(&cpuset_lock, MA_OWNED);
 	CPU_AND(&set->cs_mask, &set->cs_mask, mask);
+	cpuset_flags_update(set);
 	LIST_FOREACH(nset, &set->cs_children, cs_siblings) 
 		cpuset_update(nset, &set->cs_mask);
 
@@ -1659,6 +1674,7 @@ cpuset_thread0(void)
 	LIST_INSERT_HEAD(&cpuset_ids, set, cs_link);
 	refcount_init(&set->cs_ref, 1);
 	set->cs_flags = CPU_SET_ROOT | CPU_SET_RDONLY;
+	cpuset_flags_update(set);
 	set->cs_domain = domainset0;
 	cpuset_zero = set;
 	cpuset_root = &set->cs_mask;

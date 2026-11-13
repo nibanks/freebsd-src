@@ -149,6 +149,7 @@ struct cpuset {
 
 #define CPU_SET_ROOT    0x0001  /* Set is a root set. */
 #define CPU_SET_RDONLY  0x0002  /* No modification allowed. */
+#define CPU_SET_ONECPU  0x0004  /* Mask holds a single cpu. */
 
 extern cpuset_t *cpuset_root;
 struct prison;
